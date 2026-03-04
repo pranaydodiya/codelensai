@@ -1,0 +1,542 @@
+# 🧠 CodeLens AI — Master Implementation Plan
+
+> **Project:** CodeLens AI — AI-powered GitHub PR Code Review SaaS  
+> **Stack:** Next.js 15, TypeScript, Prisma, PostgreSQL, BetterAuth, Inngest, Gemini AI → Ollama, Polar (billing)  
+> **Last Updated:** 2026-03-04
+
+---
+
+## 📊 Overall Progress
+
+```
+████████████████████████░░░░░░░░  ~65% Complete
+```
+
+| Category                                         | Status             |
+| ------------------------------------------------ | ------------------ |
+| Core Infrastructure                              | ✅ Done            |
+| Auth & GitHub OAuth                              | ✅ Done            |
+| Repository Management (Connect / Disconnect)     | ✅ Done            |
+| AI Review Pipeline (Inngest 5-step)              | ✅ Done            |
+| RAG Pipeline (Pinecone + Gemini Embeddings)      | ✅ Done            |
+| AI Code Generator                                | ✅ Done            |
+| AI Summarizer                                    | ✅ Done            |
+| Dashboard & Stats                                | ✅ Done            |
+| Review History & Detail Viewer                   | ✅ Done            |
+| Subscription / Payments (Polar)                  | ✅ Done            |
+| Settings Page                                    | ✅ Done            |
+| PR Analytics (8 charts)                          | ✅ Done            |
+| **[REMOVED]** Teams / Orgs / Invitations / Audit | 🗑️ Removed         |
+| **GitHub Collaborator Management**               | ✅ Done            |
+| **Developer File Activity Analytics**            | ✅ Done            |
+| Webhook HMAC Signature Fix                       | ⚠️ Partial         |
+| Fix Fake Dashboard Data                          | ⚠️ Still mock data |
+| Ollama Migration                                 | 🔴 Not Started     |
+| Incremental Indexing                             | 🔴 Not Started     |
+| Production Hardening                             | 🔴 Not Started     |
+
+---
+
+## ✅ PHASE 1 — Foundation (COMPLETE)
+
+### Step 1.1 — Project Scaffold ✅
+
+- [x] Next.js 15 + TypeScript + Tailwind CSS + shadcn/ui
+- [x] Prisma + PostgreSQL (Neon)
+- [x] Environment variables configured
+- [x] `bun` as package manager
+
+### Step 1.2 — Database Schema ✅
+
+- [x] [User](file:///c:/Users/prana/OneDrive/Desktop/codelensai/module/analytics/actions/index.ts#17-39), [Session](file:///c:/Users/prana/OneDrive/Desktop/codelensai/module/analytics/actions/index.ts#11-16), `Account`, `Verification` (BetterAuth)
+- [x] [Repository](file:///c:/Users/prana/OneDrive/Desktop/codelensai/app/dashboard/repository/page.tsx#19-30) (githubId BigInt unique)
+- [x] [Review](file:///c:/Users/prana/OneDrive/Desktop/codelensai/app/dashboard/reviews/page.tsx#49-261) + [ReviewDetail](file:///c:/Users/prana/OneDrive/Desktop/codelensai/module/analytics/actions/index.ts#229-258) (author, model, gen time, diff)
+- [x] `FileChange` (per-file tracking per PR — `changedBy` field stores GitHub username)
+- [x] `UserUsage` (repo count + review quota tracking)
+- [x] Cleaned schema: removed `Organization`, `Team`, `OrgMember`, [Invitation](file:///c:/Users/prana/OneDrive/Desktop/codelensai/module/collaborator/actions/index.ts#186-194), `AuditLog`, `Test`
+
+### Step 1.3 — Authentication ✅
+
+- [x] BetterAuth + GitHub OAuth
+- [x] Session middleware on all dashboard routes
+- [x] Polar customer auto-created on sign-up
+
+---
+
+## ✅ PHASE 2 — Core Features (COMPLETE)
+
+### Step 2.1 — Repository Management ✅
+
+- [x] List GitHub repos (paginated, infinite scroll)
+- [x] Connect → creates webhook + saves to DB + triggers indexing
+- [x] Disconnect → removes from DB
+- [x] FREE tier: max 5 repos
+
+### Step 2.2 — GitHub Webhook ✅
+
+- [x] Endpoint: `POST /api/webhooks/github`
+- [x] Listens for `pull_request` events (opened, synchronize, reopened)
+- [x] Fires `pr.review.requested` Inngest event
+
+### Step 2.3 — AI Review Pipeline (Inngest) ✅
+
+- [x] Step 1: Fetch PR metadata + diff + file stats via Octokit
+- [x] Step 2: Retrieve RAG context from Pinecone
+- [x] Step 3: Generate review via Gemini 2.5 Flash
+- [x] Step 4: Post review comment on GitHub PR
+- [x] Step 5: Save Review + ReviewDetail + FileChange records to DB
+- [x] Concurrency limit: 5 simultaneous reviews
+- [x] FREE tier review quota: 5 per repo
+
+### Step 2.4 — RAG Pipeline ✅
+
+- [x] [module/ai/lib/rag.ts](file:///c:/Users/prana/OneDrive/Desktop/codelensai/module/ai/lib/rag.ts) — embed + index + retrieve
+- [x] Pinecone `codelens` index (3072 dims, Google embeddings)
+- [x] Context injected into review prompt
+
+---
+
+## ✅ PHASE 3 — Dashboard & UI (COMPLETE)
+
+### Step 3.1 — Dashboard Home ✅
+
+- [x] Stats cards (Total Commits, PRs, AI Reviews, Repos)
+- [x] GitHub Contribution heatmap
+- [x] Monthly Activity bar chart ⚠️ _(still uses partial mock data — fix in Phase 5)_
+- [x] 10-second auto-refresh
+
+### Step 3.2 — Review History + Detail Viewer ✅
+
+- [x] Review list with rich metadata (author avatar, files changed, badges, gen time)
+- [x] Full markdown render with Mermaid diagram support
+- [x] Metadata panel (model, gen time, RAG context)
+- [x] Files changed tab
+
+### Step 3.3 — AI Tools ✅
+
+- [x] AI Code Generator (streaming, language selector, quick prompts)
+- [x] AI Code Summarizer
+- [x] AI Playground (`/api/ai/playground`)
+
+### Step 3.4 — Settings & Subscription ✅
+
+- [x] Profile form (name / email update)
+- [x] Connected repo list with disconnect
+- [x] Polar FREE/PRO subscription UI
+- [x] Usage tracking (repos used, review quota)
+
+### Step 3.5 — PR Analytics Dashboard ✅
+
+- [x] PRs per user (bar chart)
+- [x] Code churn — additions vs deletions (area chart)
+- [x] AI usage per member (bar chart)
+- [x] Average review generation time (line chart)
+- [x] Files modified per repo (grouped bar)
+- [x] Review status distribution (pie chart)
+- [x] Most modified files (sortable table)
+- [x] Overview stats cards
+
+---
+
+## ✅ PHASE 4 — GitHub Collaborator Management (COMPLETE)
+
+> **This is the new core enterprise feature replacing the old Teams/Orgs system.**  
+> **Real GitHub collaboration data via GitHub API — no fake internal system.**
+
+### What We're Building
+
+```
+User connects a repo
+  ↓
+CodeLens shows current GitHub collaborators
+  ↓
+User can:
+  ├── Add new collaborator (by GitHub username)
+  ├── Remove existing collaborator
+  ├── Change permission level (pull / push / admin)
+  └── See per-collaborator activity stats
+        ├── PRs opened
+        ├── Files changed (which files)
+        ├── Lines added / deleted
+        └── Last active
+```
+
+---
+
+### Step 4.1 — GitHub Collaborator API Module
+
+**File:** [module/collaborator/lib/github-collaborators.ts](file:///c:/Users/prana/OneDrive/Desktop/codelensai/module/collaborator/lib/github-collaborators.ts)
+
+Functions to build using **Octokit REST API**:
+
+| Function                                                     | GitHub API                                                      | What it does                                     |
+| ------------------------------------------------------------ | --------------------------------------------------------------- | ------------------------------------------------ |
+| [listCollaborators(token, owner, repo)](file:///c:/Users/prana/OneDrive/Desktop/codelensai/module/collaborator/lib/github-collaborators.ts#28-57)                      | `GET /repos/{owner}/{repo}/collaborators`                       | List all collaborators with permissions          |
+| [addCollaborator(token, owner, repo, username, permission)](file:///c:/Users/prana/OneDrive/Desktop/codelensai/module/collaborator/lib/github-collaborators.ts#60-83)  | `PUT /repos/{owner}/{repo}/collaborators/{username}`            | Add collaborator (sends invite or adds directly) |
+| [removeCollaborator(token, owner, repo, username)](file:///c:/Users/prana/OneDrive/Desktop/codelensai/module/collaborator/actions/index.ts#160-168)           | `DELETE /repos/{owner}/{repo}/collaborators/{username}`         | Remove collaborator access                       |
+| `updatePermission(token, owner, repo, username, permission)` | `PUT /repos/{owner}/{repo}/collaborators/{username}`            | Change permission level                          |
+| `getCollaboratorPermission(token, owner, repo, username)`    | `GET /repos/{owner}/{repo}/collaborators/{username}/permission` | Get specific permission                          |
+| [listPendingInvitations(token, owner, repo)](file:///c:/Users/prana/OneDrive/Desktop/codelensai/module/collaborator/lib/github-collaborators.ts#122-145)                 | `GET /repos/{owner}/{repo}/invitations`                         | See pending (not-yet-accepted) invites           |
+| [cancelInvitation(token, owner, repo, invitationId)](file:///c:/Users/prana/OneDrive/Desktop/codelensai/module/collaborator/actions/index.ts#186-194)         | `DELETE /repos/{owner}/{repo}/invitations/{invitationId}`       | Cancel an invite                                 |
+
+**Permission levels:**
+
+- `pull` — Read only
+- `push` — Read + Write
+- `maintain` — No destructive actions
+- `admin` — Full control
+- `triage` — Can manage issues/PRs but not code
+
+**Schema addition needed:**
+
+```prisma
+// No new DB table needed!
+// Collaborator data comes LIVE from GitHub API every time.
+// Only cache: per-collaborator activity stats (derived from existing FileChange + ReviewDetail)
+```
+
+---
+
+### Step 4.2 — Collaborator Actions (Server Actions)
+
+**File:** [module/collaborator/actions/index.ts](file:///c:/Users/prana/OneDrive/Desktop/codelensai/module/collaborator/actions/index.ts)
+
+```typescript
+// Actions to create:
+getCollaborators(repoId); // Fetch from GitHub API + merge local activity stats
+addCollaborator(repoId, username, permission); // GitHub API + log action
+removeCollaborator(repoId, username); // GitHub API + log action
+updateCollaboratorPermission(repoId, username, permission); // GitHub API
+getPendingInvites(repoId); // GitHub API — list pending invites
+cancelPendingInvite(repoId, invitationId); // GitHub API
+getCollaboratorActivity(repoId, githubUsername); // From local DB (FileChange + ReviewDetail)
+```
+
+**Each collaborator card will show:**
+
+- GitHub avatar + username + display name
+- Current permission badge (pull/push/admin in color)
+- **PRs authored** (count from `ReviewDetail.prAuthor`)
+- **Files changed** (count from `FileChange.changedBy`)
+- **Total lines added/deleted** (sum from `FileChange`)
+- **Last activity date**
+- Actions: Change Permission / Remove
+
+---
+
+### Step 4.3 — Developer Activity Per File (Key Feature)
+
+**The main insight:** Which developer touched which files and how much?
+
+Data already exists in `FileChange` table (has `changedBy` = GitHub username, `filePath`, `linesAdded`, `linesDeleted`).
+
+New query to add in [module/collaborator/actions/index.ts](file:///c:/Users/prana/OneDrive/Desktop/codelensai/module/collaborator/actions/index.ts):
+
+```typescript
+// Per developer → which files they changed and how many times
+getDeveloperFileActivity(repoId, githubUsername);
+// Returns:
+// [
+//   { filePath: "src/api/auth.ts", timesChanged: 5, linesAdded: 120, linesDeleted: 45 },
+//   { filePath: "src/utils/parse.ts", timesChanged: 3, linesAdded: 32, linesDeleted: 10 },
+// ]
+
+// Per file → which developers touched it
+getFileDeveloperActivity(repoId, filePath);
+// Returns:
+// [
+//   { developer: "john_dev", timesChanged: 5, linesAdded: 120 },
+//   { developer: "jane_dev", timesChanged: 2, linesAdded: 30 },
+// ]
+```
+
+---
+
+### Step 4.4 — Collaborators Dashboard Page
+
+**File:** [app/dashboard/collaborators/page.tsx](file:///c:/Users/prana/OneDrive/Desktop/codelensai/app/dashboard/collaborators/page.tsx)
+
+**Layout:**
+
+```
+┌─────────────────────────────────────────────────────┐
+│  Collaborators     [Select Repository ▼]             │
+├─────────────────────────────────────────────────────┤
+│  [+ Add Collaborator]   [Pending Invites (2)]        │
+├─────────────────────────────────────────────────────┤
+│                                                     │
+│  ┌──────────────────────────────────────────────┐  │
+│  │ 👤 john_dev          [push] [Edit] [Remove]  │  │
+│  │    12 PRs · 48 files changed · 1,240 lines   │  │
+│  │    Last active: 2 days ago                   │  │
+│  │    [View File Activity →]                    │  │
+│  └──────────────────────────────────────────────┘  │
+│                                                     │
+│  ┌──────────────────────────────────────────────┐  │
+│  │ 👤 jane_dev          [admin] [Edit] [Remove] │  │
+│  │    5 PRs · 22 files changed · 540 lines      │  │
+│  │    Last active: 5 days ago                   │  │
+│  │    [View File Activity →]                    │  │
+│  └──────────────────────────────────────────────┘  │
+│                                                     │
+└─────────────────────────────────────────────────────┘
+```
+
+**Add Collaborator Modal:**
+
+- GitHub username input
+- Permission level dropdown (pull / push / maintain / admin)
+- Submit → GitHub API → success toast
+
+**File Activity Drawer (click "View File Activity →"):**
+
+```
+john_dev — File Activity
+━━━━━━━━━━━━━━━━━━━━━━━━
+src/api/auth.ts         ████████ 5x  (+120 / -45)
+src/utils/parse.ts      █████    3x  (+32 / -10)
+app/dashboard/page.tsx  ██       2x  (+18 / -5)
+prisma/schema.prisma    █        1x  (+40 / -0)
+```
+
+---
+
+### Step 4.5 — Implementation Checklist
+
+- [x] [module/collaborator/lib/github-collaborators.ts](file:///c:/Users/prana/OneDrive/Desktop/codelensai/module/collaborator/lib/github-collaborators.ts) — all Octokit calls
+- [x] [module/collaborator/actions/index.ts](file:///c:/Users/prana/OneDrive/Desktop/codelensai/module/collaborator/actions/index.ts) — server actions (getCollaborators, add, remove, update, activity)
+- [x] [app/dashboard/collaborators/page.tsx](file:///c:/Users/prana/OneDrive/Desktop/codelensai/app/dashboard/collaborators/page.tsx) — main UI page
+- [x] Add "Collaborators" to sidebar ([components/app-sidebar.tsx](file:///c:/Users/prana/OneDrive/Desktop/codelensai/components/app-sidebar.tsx)) with `Users` icon
+- [x] Add Collaborator Modal component — username input + permission select
+- [x] Pending Invites panel — list + cancel button
+- [x] File Activity Drawer — per-developer file breakdown
+- [x] Permission change dropdown (inline on each collaborator card)
+- [x] Error handling (user not found on GitHub, no push access, etc.)
+
+**Data flow:**
+
+```
+Page loads → getCollaborators(repoId)
+  ↓
+GitHub API (live list) + DB query (FileChange, ReviewDetail for activity stats)
+  ↓
+Merge: GitHub collaborator objects + local activity data
+  ↓
+Render cards with both permission info AND activity stats
+```
+
+---
+
+## ⚠️ PHASE 5 — Known Tech Debt to Fix (QUICK WINS)
+
+| Task                                                               | File                                                  | Effort |
+| ------------------------------------------------------------------ | ----------------------------------------------------- | ------ |
+| Fix `text-3x1` → `text-3xl` CSS typo                               | `dashboard/page.tsx:50`, `repository/page.tsx:78,121` | 5 min  |
+| Add `await` to `reviewPullRequest()` webhook (fire-and-forget bug) | `app/api/webhooks/github/route.ts:22-24`              | 10 min |
+| Add HMAC signature verification on webhook                         | [app/api/webhooks/github/route.ts](file:///c:/Users/prana/OneDrive/Desktop/codelensai/app/api/webhooks/github/route.ts)                    | 30 min |
+| Replace `generateSampleReviews()` fake data in dashboard           | `module/dashboard/actions/index.ts:179-195`           | 1 hr   |
+| Remove hardcoded ngrok URL from `trustedOrigins`                   | `lib/auth.ts:19`                                      | 5 min  |
+| Switch Polar from `server: "sandbox"` to production                | `module/payment/config/polar.ts:5`                    | 5 min  |
+| Add rate limiting on `/api/ai/*` endpoints                         | `app/api/ai/*/route.ts`                               | 1 hr   |
+
+---
+
+## 🔴 PHASE 6 — Ollama Migration (v2.0)
+
+> 📄 Full spec: [diff/02-ollama-migration-plan.md](file:///c:/Users/prana/OneDrive/Desktop/codelensai/diff/02-ollama-migration-plan.md)
+
+**Goal:** Replace Gemini (external API cost) with self-hosted Ollama (free).
+
+### Step 6.1 — Create `module/llm/` Abstraction Layer
+
+- [ ] `provider-interface.ts` — `LLMProvider` + `EmbeddingProvider` interfaces
+- [ ] `ollama-provider.ts` — Ollama HTTP client
+- [ ] `gemini-provider.ts` — wrap existing gemini.ts as named provider
+- [ ] `model-config.ts` — `MODEL_REGISTRY` (code-review: deepseek-coder-v2:16b, etc.)
+- [ ] `feature-flags.ts` — `LLM_PROVIDER=ollama|gemini` env switching
+
+### Step 6.2 — Refactor All LLM Integration Points
+
+- [ ] [inngest/functions/review.ts](file:///c:/Users/prana/OneDrive/Desktop/codelensai/inngest/functions/review.ts) → `llmProvider.generate()`
+- [ ] [app/api/ai/summarize/route.ts](file:///c:/Users/prana/OneDrive/Desktop/codelensai/app/api/ai/summarize/route.ts) → `llmProvider.generate()`
+- [ ] [app/api/ai/generate/route.ts](file:///c:/Users/prana/OneDrive/Desktop/codelensai/app/api/ai/generate/route.ts) → `llmProvider.generate()`
+- [ ] [module/ai/lib/rag.ts](file:///c:/Users/prana/OneDrive/Desktop/codelensai/module/ai/lib/rag.ts) → `embeddingProvider.embed()` (768 dims)
+- [ ] Create new Pinecone index `codelens-v2` (768 dims for nomic-embed-text)
+- [ ] Re-index all repos via `inngest/functions/reindex.ts`
+
+### Step 6.3 — Gradual Rollout
+
+- [ ] Shadow mode: both run in parallel, Gemini served to users
+- [ ] Canary: 10% traffic to Ollama
+- [ ] Full migration: all to Ollama, keep Gemini keys for rollback
+
+---
+
+## 🔴 PHASE 7 — Incremental Repository Indexing
+
+> 📄 Full spec: [diff/06-feature-incremental-indexing.md](file:///c:/Users/prana/OneDrive/Desktop/codelensai/diff/06-feature-incremental-indexing.md)
+
+**Goal:** Replace costly full-repo indexing with smart delta indexing. Fix #1 scalability risk.
+
+### Key Changes
+
+- [ ] Add `IndexingState` model to schema (lastCommitSHA, status, indexedFiles count)
+- [ ] Rewrite [inngest/functions/index.ts](file:///c:/Users/prana/OneDrive/Desktop/codelensai/inngest/functions/index.ts) to use Git Trees API (1 call vs 120+)
+- [ ] `module/ai/lib/file-prioritizer.ts` — prioritize `src/`, `.ts/.tsx` files
+- [ ] Create `inngest/functions/incremental-index.ts` — triggered per PR
+- [ ] Create `inngest/functions/sync-index.ts` — daily cron at 3 AM
+- [ ] UI: show indexing status badge per repo in Settings
+- [ ] "Re-index" button per repo (rate limited: 1/hour)
+
+---
+
+## 🔴 PHASE 8 — Code Risk Scoring Engine
+
+> 📄 Full spec: [diff/04-feature-code-risk-scoring.md](file:///c:/Users/prana/OneDrive/Desktop/codelensai/diff/04-feature-code-risk-scoring.md)
+
+**Goal:** Auto-assign 0–100 risk score to every PR via static analysis.
+
+### Key Changes
+
+- [ ] Add `RiskScore` model to schema
+- [ ] `module/risk/lib/risk-engine.ts` — static analysis (complexity, security, impact, test coverage)
+- [ ] `module/risk/lib/patterns.ts` — `SECURITY_PATTERNS` regex (hardcoded creds, eval(), innerHTML=, etc.)
+- [ ] Run **in parallel** with AI review in [inngest/functions/review.ts](file:///c:/Users/prana/OneDrive/Desktop/codelensai/inngest/functions/review.ts)
+- [ ] Risk badge on Review cards + Risk trend chart in Analytics
+
+---
+
+## 🔴 PHASE 9 — Real Engineering Analytics
+
+> 📄 Full spec: [diff/05-feature-engineering-analytics.md](file:///c:/Users/prana/OneDrive/Desktop/codelensai/diff/05-feature-engineering-analytics.md)
+
+- [ ] Add `AnalyticsSnapshot` + `FileHotspot` models
+- [ ] Hourly Inngest cron: `aggregateAnalytics`
+- [ ] Replace `generateSampleReviews()` with real DB queries
+- [ ] Risk trend chart, file hotspot table, review velocity chart
+- [ ] PRO tier gating for advanced analytics (7-day vs full history)
+
+---
+
+## 🔴 PHASE 10 — Self-Improving Feedback Loop
+
+> 📄 Full spec: [diff/03-feature-self-improving-feedback-loop.md](file:///c:/Users/prana/OneDrive/Desktop/codelensai/diff/03-feature-self-improving-feedback-loop.md)
+
+- [ ] Add `ReviewFeedback` + `FeedbackAggregation` models
+- [ ] 👍👎❌💡 buttons on review cards and detail page
+- [ ] Every-6-hour Inngest cron: `aggregateFeedback`
+- [ ] Inject top-5 feedback hints into future review prompts for that repo
+
+---
+
+## 🔴 PHASE 11 — AI Auto-Fix PR Generation (PRO tier)
+
+> 📄 Full spec: [diff/07-feature-ai-autofix.md](file:///c:/Users/prana/OneDrive/Desktop/codelensai/diff/07-feature-ai-autofix.md)
+
+- [ ] Add `AutoFix` model + `autoFixEnabled / autoFixThreshold` on User
+- [ ] `module/autofix/` — fix generator, GitHub branch creation, PR creation
+- [ ] Triggered after review if: PRO user + autoFix enabled + risk score > threshold
+- [ ] Settings: toggle + risk threshold slider
+- [ ] Review list: auto-fix status badge + link to fix PR
+
+---
+
+## 🔴 PHASE 12 — Production Hardening
+
+- [ ] Sentry error tracking
+- [ ] `loading.tsx` for all dashboard segments
+- [ ] Email notifications (Resend) — review done, collaborator invited
+- [ ] Encrypt GitHub tokens in DB
+- [ ] Add CSRF protection on AI API endpoints
+- [ ] Vitest unit tests for server actions
+- [ ] Playwright E2E: auth + PR review + collaborator flow
+- [ ] Deploy to Vercel production + Neon production DB
+- [ ] Switch Polar to production
+
+---
+
+## 📋 Immediate Next Steps (Priority Order)
+
+### ✅ Phase 4 — GitHub Collaborator Feature — DONE
+
+| Step | Task | File | Status |
+| ---- | ---- | ---- | ------ |
+| 1 | GitHub collaborator API functions | [module/collaborator/lib/github-collaborators.ts](file:///c:/Users/prana/OneDrive/Desktop/codelensai/module/collaborator/lib/github-collaborators.ts) | ✅ Done |
+| 2 | Server actions (get, add, remove, update, activity) | [module/collaborator/actions/index.ts](file:///c:/Users/prana/OneDrive/Desktop/codelensai/module/collaborator/actions/index.ts) | ✅ Done |
+| 3 | Collaborators dashboard page | [app/dashboard/collaborators/page.tsx](file:///c:/Users/prana/OneDrive/Desktop/codelensai/app/dashboard/collaborators/page.tsx) | ✅ Done |
+| 4 | Add "Collaborators" to sidebar | [components/app-sidebar.tsx](file:///c:/Users/prana/OneDrive/Desktop/codelensai/components/app-sidebar.tsx) | ✅ Done |
+
+### 🚨 Next Build — Quick Fixes (Tech Debt)
+
+| Task | Effort |
+| ----------------------------------- | ------ |
+| Fix webhook HMAC signature | 30 min |
+| Fix `text-3x1` CSS typo | 5 min |
+| Fix fire-and-forget webhook | 10 min |
+| Replace fake dashboard monthly data | 1 hr |
+
+### 🔵 Next Big Features
+
+1. **Phase 5** — Quick tech debt fixes (HMAC, CSS typo, mock data)
+2. **Phase 6** — Ollama Migration (`module/llm/` abstraction layer)
+3. **Phase 7** — Incremental Indexing (smart `indexRepo` rewrite)
+4. **Phase 8** — Code Risk Scoring (static analysis + per-PR score)
+
+---
+
+## 🗺️ Feature Dependency Graph
+
+```
+GitHub Collaborator Management  ✅ COMPLETE
+        ↓
+  Developer Activity Analytics  ✅ COMPLETE (FileChange.changedBy + per-file drawer)
+        ↓
+  Code Risk Scoring Engine      🔴 Next (gives each PR a risk score)
+        ↓
+  Real Engineering Analytics    🔴 (aggregated snapshots + hotspots)
+        ↓
+  Feedback Loop                 🔴 (👍👎 → prompt injection)
+        ↓
+  AI Auto-Fix                   🔴 (PRO tier, needs all above)
+```
+
+---
+
+## 🗂️ Key File Map
+
+| Feature            | Key Files                                                        |
+| ------------------ | ---------------------------------------------------------------- |
+| Auth               | [lib/auth.ts](file:///c:/Users/prana/OneDrive/Desktop/codelensai/lib/auth.ts), [app/api/auth/[...all]/route.ts](file:///c:/Users/prana/OneDrive/Desktop/codelensai/app/api/auth/%5B...all%5D/route.ts)                  |
+| DB                 | [prisma/schema.prisma](file:///c:/Users/prana/OneDrive/Desktop/codelensai/prisma/schema.prisma), [lib/db.ts](file:///c:/Users/prana/OneDrive/Desktop/codelensai/lib/db.ts)                              |
+| GitHub Webhook     | [app/api/webhooks/github/route.ts](file:///c:/Users/prana/OneDrive/Desktop/codelensai/app/api/webhooks/github/route.ts)                               |
+| AI Review Job      | [inngest/functions/review.ts](file:///c:/Users/prana/OneDrive/Desktop/codelensai/inngest/functions/review.ts)                                    |
+| Repo Indexer       | [inngest/functions/index.ts](file:///c:/Users/prana/OneDrive/Desktop/codelensai/inngest/functions/index.ts)                                     |
+| RAG                | [module/ai/lib/rag.ts](file:///c:/Users/prana/OneDrive/Desktop/codelensai/module/ai/lib/rag.ts)                                           |
+| Gemini Service     | [module/ai/lib/gemini.ts](file:///c:/Users/prana/OneDrive/Desktop/codelensai/module/ai/lib/gemini.ts)                                        |
+| Dashboard          | [app/dashboard/page.tsx](file:///c:/Users/prana/OneDrive/Desktop/codelensai/app/dashboard/page.tsx)                                         |
+| Reviews List       | [app/dashboard/reviews/page.tsx](file:///c:/Users/prana/OneDrive/Desktop/codelensai/app/dashboard/reviews/page.tsx)                                 |
+| Review Detail      | [app/dashboard/reviews/[id]/page.tsx](file:///c:/Users/prana/OneDrive/Desktop/codelensai/app/dashboard/reviews/%5Bid%5D/page.tsx)                            |
+| AI Generator       | [app/dashboard/ai-generator/page.tsx](file:///c:/Users/prana/OneDrive/Desktop/codelensai/app/dashboard/ai-generator/page.tsx)                            |
+| Collaborators ✅   | [app/dashboard/collaborators/page.tsx](file:///c:/Users/prana/OneDrive/Desktop/codelensai/app/dashboard/collaborators/page.tsx)                           |
+| Analytics          | [app/dashboard/analytics/page.tsx](file:///c:/Users/prana/OneDrive/Desktop/codelensai/app/dashboard/analytics/page.tsx)                               |
+| Subscription       | [app/dashboard/subscription/page.tsx](file:///c:/Users/prana/OneDrive/Desktop/codelensai/app/dashboard/subscription/page.tsx)                            |
+| Sidebar            | [components/app-sidebar.tsx](file:///c:/Users/prana/OneDrive/Desktop/codelensai/components/app-sidebar.tsx)                                     |
+| Analytics Actions  | [module/analytics/actions/index.ts](file:///c:/Users/prana/OneDrive/Desktop/codelensai/module/analytics/actions/index.ts)                              |
+| Payment Actions    | [module/payment/actions/index.ts](file:///c:/Users/prana/OneDrive/Desktop/codelensai/module/payment/actions/index.ts)                                |
+| Collab Actions ✅  | [module/collaborator/actions/index.ts](file:///c:/Users/prana/OneDrive/Desktop/codelensai/module/collaborator/actions/index.ts)                           |
+| Collab GitHub ✅   | [module/collaborator/lib/github-collaborators.ts](file:///c:/Users/prana/OneDrive/Desktop/codelensai/module/collaborator/lib/github-collaborators.ts)                |
+
+---
+
+## 📂 Diff Docs Reference
+
+| File                                              | Contents                                                    |
+| ------------------------------------------------- | ----------------------------------------------------------- |
+| [diff/02-ollama-migration-plan.md](file:///c:/Users/prana/OneDrive/Desktop/codelensai/diff/02-ollama-migration-plan.md)                | Full Ollama migration guide with code, Docker, rollback     |
+| [diff/03-feature-self-improving-feedback-loop.md](file:///c:/Users/prana/OneDrive/Desktop/codelensai/diff/03-feature-self-improving-feedback-loop.md) | Feedback loop: DB models, Inngest cron, prompt injection    |
+| [diff/04-feature-code-risk-scoring.md](file:///c:/Users/prana/OneDrive/Desktop/codelensai/diff/04-feature-code-risk-scoring.md)            | Risk engine: scoring, security regex patterns               |
+| [diff/05-feature-engineering-analytics.md](file:///c:/Users/prana/OneDrive/Desktop/codelensai/diff/05-feature-engineering-analytics.md)        | Analytics: snapshot models, aggregation, dashboard design   |
+| [diff/06-feature-incremental-indexing.md](file:///c:/Users/prana/OneDrive/Desktop/codelensai/diff/06-feature-incremental-indexing.md)         | Smart indexing: Git Trees API, file prioritizer, daily sync |
+| [diff/07-feature-ai-autofix.md](file:///c:/Users/prana/OneDrive/Desktop/codelensai/diff/07-feature-ai-autofix.md)                   | Auto-fix: LLM fix generation, GitHub branch/PR creation     |
+| [diff/08-execution-roadmap.md](file:///c:/Users/prana/OneDrive/Desktop/codelensai/diff/08-execution-roadmap.md)                    | Dependency graph, 12-week timeline, success metrics         |
+| [diff/09-long-term-strategy.md](file:///c:/Users/prana/OneDrive/Desktop/codelensai/diff/09-long-term-strategy.md)                   | Long-term enterprise SaaS strategy                          |
