@@ -344,3 +344,161 @@ ${comment}
 `
   });
 }
+
+// ─────────────────────────────────────────────────────────
+// GIT TREES API — Fetch entire repo file tree in 1 call
+// ─────────────────────────────────────────────────────────
+
+export interface TreeFile {
+  path: string;
+  sha: string;
+  size: number;
+  type: "blob" | "tree";
+}
+
+/**
+ * Fetch the full recursive file tree for a repo at a given ref (default: HEAD).
+ * Uses a single API call instead of N recursive getContent calls.
+ * Returns only blobs (files), not tree entries (directories).
+ */
+export async function getRepoTree(
+  token: string,
+  owner: string,
+  repo: string,
+  ref: string = "HEAD",
+): Promise<{ sha: string; files: TreeFile[] }> {
+  const octokit = new Octokit({ auth: token });
+
+  const { data } = await octokit.rest.git.getTree({
+    owner,
+    repo,
+    tree_sha: ref,
+    recursive: "true",
+  });
+
+  const files: TreeFile[] = (data.tree || [])
+    .filter((item) => item.type === "blob" && item.path && item.sha)
+    .map((item) => ({
+      path: item.path!,
+      sha: item.sha!,
+      size: item.size || 0,
+      type: "blob" as const,
+    }));
+
+  return { sha: data.sha, files };
+}
+
+/**
+ * Fetch file contents by blob SHA (base64 decoded).
+ * More efficient than getContent when you already have the SHA from a tree.
+ */
+export async function getFileByBlob(
+  token: string,
+  owner: string,
+  repo: string,
+  sha: string,
+): Promise<string> {
+  const octokit = new Octokit({ auth: token });
+
+  const { data } = await octokit.rest.git.getBlob({
+    owner,
+    repo,
+    file_sha: sha,
+  });
+
+  if (data.encoding === "base64" && data.content) {
+    return Buffer.from(data.content, "base64").toString("utf-8");
+  }
+
+  return data.content || "";
+}
+
+/**
+ * Batch fetch file contents for multiple blobs.
+ * Fetches in parallel batches to avoid rate limiting.
+ */
+export async function batchGetFileContents(
+  token: string,
+  owner: string,
+  repo: string,
+  files: { path: string; sha: string }[],
+  concurrency: number = 10,
+): Promise<{ path: string; content: string }[]> {
+  const results: { path: string; content: string }[] = [];
+
+  for (let i = 0; i < files.length; i += concurrency) {
+    const batch = files.slice(i, i + concurrency);
+    const batchResults = await Promise.allSettled(
+      batch.map(async (file) => {
+        const content = await getFileByBlob(token, owner, repo, file.sha);
+        return { path: file.path, content };
+      }),
+    );
+
+    for (const result of batchResults) {
+      if (result.status === "fulfilled" && result.value.content) {
+        results.push(result.value);
+      }
+    }
+  }
+
+  return results;
+}
+
+/**
+ * Compare two commits and return the list of changed files.
+ * Used for incremental indexing — only re-index what changed.
+ */
+export async function compareCommits(
+  token: string,
+  owner: string,
+  repo: string,
+  base: string,
+  head: string,
+): Promise<{
+  files: {
+    path: string;
+    status: "added" | "removed" | "modified" | "renamed";
+    sha: string;
+  }[];
+  headSHA: string;
+}> {
+  const octokit = new Octokit({ auth: token });
+
+  const { data } = await octokit.rest.repos.compareCommits({
+    owner,
+    repo,
+    base,
+    head,
+  });
+
+  const files = (data.files || []).map((f) => ({
+    path: f.filename,
+    status: f.status as "added" | "removed" | "modified" | "renamed",
+    sha: f.sha ?? "",
+  }));
+
+  return { files, headSHA: data.merge_base_commit?.sha || head };
+}
+
+/**
+ * Get the latest commit SHA for the default branch.
+ */
+export async function getHeadSHA(
+  token: string,
+  owner: string,
+  repo: string,
+): Promise<string> {
+  const octokit = new Octokit({ auth: token });
+
+  const { data } = await octokit.rest.repos.get({ owner, repo });
+  const defaultBranch = data.default_branch;
+
+  const { data: ref } = await octokit.rest.git.getRef({
+    owner,
+    repo,
+    ref: `heads/${defaultBranch}`,
+  });
+
+  return ref.object.sha;
+}

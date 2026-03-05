@@ -1,10 +1,14 @@
 import { inngest } from "../client";
 import { getPullRequestDiff, postReviewComment } from "@/module/github/lib/github";
-import { retrieveContext } from "@/module/ai/lib/rag";
-import { generateText } from "ai";
-import { google } from "@ai-sdk/google";
+import { retrieveContext, buildRetrievalQuery } from "@/module/ai/lib/rag";
+import { generateWithFallback, DEFAULT_MODEL } from "@/module/ai/lib/gemini";
 import prisma from "@/lib/db";
 import { Octokit } from "octokit";
+import {
+  REVIEW_SYSTEM_PROMPT,
+  buildReviewPrompt,
+  getTokenBudget,
+} from "@/module/ai/lib/prompts";
 
 // ─── Diff Parser: Extract file-level stats ──────────────
 function parseDiffStats(diff: string) {
@@ -98,47 +102,52 @@ export const generateReview = inngest.createFunction(
       };
     });
 
-    // Step 2: Retrieve RAG context
+    // Step 2: Retrieve RAG context (enhanced with multi-signal query)
     const context = await step.run("retrieve-context", async () => {
-      const query = `${prData.title}\n${prData.description}`;
+      // Build a rich query from PR metadata + diff
+      const fileStats = parseDiffStats(prData.diff);
+      const changedFiles = fileStats.map((f) => f.filePath);
+
+      const query = buildRetrievalQuery({
+        title: prData.title,
+        description: prData.description,
+        changedFiles,
+        diff: prData.diff,
+      });
+
       try {
-        return await retrieveContext(query, `${owner}/${repo}`);
+        return await retrieveContext(query, `${owner}/${repo}`, {
+          changedFiles,
+          filesChanged: prData.filesChanged,
+        });
       } catch (e) {
         console.warn("Failed to retrieve context, continuing without it:", e);
         return [];
       }
     });
 
-    // Step 3: Generate AI review (with timing)
+    // Step 3: Generate AI review (enhanced prompt engineering)
     const reviewResult = await step.run("generate-ai-review", async () => {
       const startTime = Date.now();
+      const diffLineCount = prData.diff.split("\n").length;
 
-      const prompt = `You are an expert code reviewer. Analyze the following pull request and provide a detailed, constructive code review.
+      const prompt = buildReviewPrompt({
+        title: prData.title,
+        description: prData.description || "",
+        diff: prData.diff,
+        context,
+        filesChanged: prData.filesChanged,
+        linesAdded: prData.linesAdded,
+        linesDeleted: prData.linesDeleted,
+        prAuthor: prData.prAuthor,
+      });
 
-PR Title: ${prData.title}
-PR Description: ${prData.description || "No description provided"}
-
-Context from Codebase:
-${context.join("\n\n")}
-
-Code Changes:
-\`\`\`diff
-${prData.diff}
-\`\`\`
-
-Please provide:
-1. **Walkthrough**: A file-by-file explanation of the changes.
-2. **Sequence Diagram**: A Mermaid JS sequence diagram visualizing the flow of the changes (if applicable). Use \`\`\`mermaid ... \`\`\` block. **IMPORTANT**: Ensure the Mermaid syntax is valid. Do not use special characters (like quotes, braces, parentheses) inside Note text or labels as it breaks rendering. Keep the diagram simple.
-3. **Summary**: Brief overview.
-4. **Strengths**: What's done well.
-5. **Issues**: Bugs, security concerns, code smells.
-6. **Suggestions**: Specific code improvements.
-
-Format your response in markdown.`;
-
-      const { text } = await generateText({
-        model: google("gemini-2.5-flash"),
+      const text = await generateWithFallback({
+        modelId: DEFAULT_MODEL,
+        system: REVIEW_SYSTEM_PROMPT,
         prompt,
+        maxOutputTokens: getTokenBudget(diffLineCount),
+        temperature: 0.2, // low = focused, consistent, less hallucination
       });
 
       const generationTimeMs = Date.now() - startTime;
@@ -205,26 +214,6 @@ Format your response in markdown.`;
           })),
         });
       }
-
-      // Create audit log
-      await prisma.auditLog.create({
-        data: {
-          organizationId: repository.organizationId,
-          userId,
-          action: "PR_REVIEWED",
-          resource: "review",
-          resourceId: review.id,
-          details: {
-            prNumber,
-            prTitle: prData.title,
-            prAuthor: prData.prAuthor,
-            filesChanged: prData.filesChanged,
-            linesAdded: prData.linesAdded,
-            linesDeleted: prData.linesDeleted,
-            generationTimeMs: reviewResult.generationTimeMs,
-          },
-        },
-      });
     });
 
     return { success: true };

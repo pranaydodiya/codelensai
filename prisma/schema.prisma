@@ -45,12 +45,35 @@ model Repository {
   userId   String
   user     User   @relation(fields: [userId], references: [id], onDelete: Cascade)
 
-  createdAt   DateTime     @default(now())
-  updatedAt   DateTime     @updatedAt
-  reviews     Review[]
-  fileChanges FileChange[]
+  createdAt     DateTime       @default(now())
+  updatedAt     DateTime       @updatedAt
+  reviews       Review[]
+  fileChanges   FileChange[]
+  indexingState  IndexingState?
 
   @@map("repository")
+}
+
+// ─────────────────────────────────────────────────────────
+// INDEXING STATE (tracks incremental indexing per repo)
+// ─────────────────────────────────────────────────────────
+model IndexingState {
+  id              String     @id @default(cuid())
+  repositoryId    String     @unique
+  repository      Repository @relation(fields: [repositoryId], references: [id], onDelete: Cascade)
+
+  lastCommitSHA   String?            // HEAD SHA at last successful index
+  lastIndexedAt   DateTime?          // When the last index completed
+  status          String   @default("idle")  // idle | indexing | failed
+  indexedFileCount Int      @default(0)
+  totalChunks     Int      @default(0)       // Total vectors in Pinecone for this repo
+  errorMessage    String?  @db.Text          // Last error if status=failed
+
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  @@index([status])
+  @@map("indexing_state")
 }
 
 // ─────────────────────────────────────────────────────────

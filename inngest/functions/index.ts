@@ -1,33 +1,119 @@
 import { inngest } from "../client";
 import prisma from "@/lib/db";
-import { getRepoFileContents } from "@/module/github/lib/github";
-import { indexCodebase } from "@/module/ai/lib/rag";
+import {
+  getRepoTree,
+  batchGetFileContents,
+  getHeadSHA,
+} from "@/module/github/lib/github";
+import { indexCodebase, deleteRepoVectors } from "@/module/ai/lib/rag";
+import { prioritizeFiles } from "@/module/ai/lib/file-prioritizer";
 
+/**
+ * Full codebase indexing — triggered when a repository is first connected.
+ * Uses the Git Trees API (single API call) instead of recursive file fetching,
+ * smart file prioritization, and function-level chunking via the RAG pipeline.
+ */
 export const indexRepo = inngest.createFunction(
-  { id: "index-repo" },
+  { id: "index-repo", retries: 2 },
   { event: "repository.connected" },
   async ({ event, step }) => {
     const { owner, repo, userId } = event.data;
+    const repoId = `${owner}/${repo}`;
 
-    const files = await step.run("fetch-files", async () => {
+    // Step 1: Init indexing state
+    const { token, repositoryId } = await step.run("init-indexing", async () => {
       const account = await prisma.account.findFirst({
-        where: {
-          userId,
-          providerId: "github",
-        },
+        where: { userId, providerId: "github" },
       });
 
       if (!account?.accessToken) {
-        throw new Error("No access token found");
+        throw new Error("No GitHub access token found");
       }
 
-      return await getRepoFileContents(account.accessToken, owner, repo);
+      const repository = await prisma.repository.findFirst({
+        where: { owner, name: repo },
+      });
+
+      if (repository) {
+        await prisma.indexingState.upsert({
+          where: { repositoryId: repository.id },
+          create: {
+            repositoryId: repository.id,
+            status: "indexing",
+          },
+          update: {
+            status: "indexing",
+            errorMessage: null,
+          },
+        });
+      }
+
+      return {
+        token: account.accessToken,
+        repositoryId: repository?.id ?? null,
+      };
     });
 
-    await step.run("index-codebase", async () => {
-      await indexCodebase(`${owner}/${repo}`, files);
+    // Step 2: Fetch repo tree + HEAD SHA (single API call each)
+    const treeData = await step.run("fetch-tree", async () => {
+      const [tree, headSHA] = await Promise.all([
+        getRepoTree(token, owner, repo),
+        getHeadSHA(token, owner, repo),
+      ]);
+      return { treeFiles: tree.files, treeSHA: tree.sha, headSHA };
     });
 
-    return { success: true, indexedFiles: files.length };
+    // Step 3: Prioritize files (smart filtering removes junk, sorts by importance)
+    const filesToIndex = await step.run("prioritize-files", async () => {
+      const paths = treeData.treeFiles.map((f) => f.path);
+      const prioritized = prioritizeFiles(paths);
+      // Map back to include SHAs from the tree for blob fetching
+      const shaMap = new Map(treeData.treeFiles.map((f) => [f.path, f.sha]));
+      return prioritized.map((p) => ({ path: p.path, sha: shaMap.get(p.path) || "" }));
+    });
+
+    // Step 4: Batch fetch file contents via blob API (parallel, rate-limited)
+    const files = await step.run("fetch-contents", async () => {
+      return await batchGetFileContents(token, owner, repo, filesToIndex);
+    });
+
+    // Step 5: Clear old vectors and index fresh with function-level chunks
+    const vectorCount = await step.run("index-codebase", async () => {
+      await deleteRepoVectors(repoId);
+      return await indexCodebase(repoId, files);
+    });
+
+    // Step 6: Update indexing state with success
+    await step.run("finalize-indexing", async () => {
+      if (!repositoryId) return;
+
+      await prisma.indexingState.upsert({
+        where: { repositoryId },
+        create: {
+          repositoryId,
+          lastCommitSHA: treeData.headSHA,
+          lastIndexedAt: new Date(),
+          status: "idle",
+          indexedFileCount: files.length,
+          totalChunks: vectorCount,
+        },
+        update: {
+          lastCommitSHA: treeData.headSHA,
+          lastIndexedAt: new Date(),
+          status: "idle",
+          indexedFileCount: files.length,
+          totalChunks: vectorCount,
+          errorMessage: null,
+        },
+      });
+    });
+
+    return {
+      success: true,
+      indexedFiles: files.length,
+      totalChunks: vectorCount,
+      treeSize: treeData.treeFiles.length,
+      prioritizedFiles: filesToIndex.length,
+    };
   },
 );
