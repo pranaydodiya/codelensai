@@ -27,6 +27,7 @@ model User {
   subscriptionStatus  String? // Active | canceled | expired
   polarCustomerId     String? @unique
   polarSubscriptionId String? @unique
+  feedbacks           ReviewFeedback[]
 
   @@unique([email])
   @@map("user")
@@ -50,6 +51,7 @@ model Repository {
   reviews       Review[]
   fileChanges   FileChange[]
   indexingState  IndexingState?
+  feedbackAggregations FeedbackAggregation[]
 
   @@map("repository")
 }
@@ -93,6 +95,7 @@ model Review {
 
   detail      ReviewDetail?
   fileChanges FileChange[]
+  feedback    ReviewFeedback[]
 
   @@index([repositoryId])
   @@index([createdAt])
@@ -223,4 +226,52 @@ model Verification {
 
   @@index([identifier])
   @@map("verification")
+}
+
+// ─────────────────────────────────────────────────────────
+// REVIEW FEEDBACK (Phase 10 — Self-Improving Feedback Loop)
+// ─────────────────────────────────────────────────────────
+model ReviewFeedback {
+  id          String   @id @default(cuid())
+  reviewId    String
+  review      Review   @relation(fields: [reviewId], references: [id], onDelete: Cascade)
+  userId      String
+  user        User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  // Which section of the review this feedback is about
+  section     String   // "issues" | "summary" | "risk" | "overall"
+  // The reaction
+  reaction    String   // "helpful" | "unhelpful" | "incorrect" | "want_more"
+  comment     String?  @db.Text  // Optional free-text comment
+
+  createdAt   DateTime @default(now())
+
+  @@unique([reviewId, userId, section])  // one reaction per user per section
+  @@index([reviewId])
+  @@index([userId])
+  @@map("review_feedback")
+}
+
+// ─────────────────────────────────────────────────────────
+// FEEDBACK AGGREGATION (Phase 10 — per-repo prompt hints)
+// ─────────────────────────────────────────────────────────
+model FeedbackAggregation {
+  id             String     @id @default(cuid())
+  repositoryId   String
+  repository     Repository @relation(fields: [repositoryId], references: [id], onDelete: Cascade)
+
+  issueCategory  String     // "security" | "performance" | "style" | "logic" | "architecture" | "overall"
+  helpfulCount   Int        @default(0)
+  unhelpfulCount Int        @default(0)
+  incorrectCount Int        @default(0)
+  totalCount     Int        @default(0)
+  accuracy       Float      @default(0)  // helpfulCount / totalCount
+  promptHints    String[]   // Derived hint strings injected into future prompts
+
+  updatedAt      DateTime   @updatedAt
+  createdAt      DateTime   @default(now())
+
+  @@unique([repositoryId, issueCategory])
+  @@index([repositoryId])
+  @@map("feedback_aggregation")
 }

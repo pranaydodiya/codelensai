@@ -183,6 +183,7 @@ export function buildReviewPrompt(opts: {
   linesAdded: number;
   linesDeleted: number;
   prAuthor: string;
+  feedbackContext?: string; // Phase 10: optional prompt hints from prior feedback
 }): string {
   const diffLines = opts.diff.split("\n").length;
 
@@ -197,9 +198,12 @@ export function buildReviewPrompt(opts: {
       ? `\nCODEBASE CONTEXT (existing patterns — match these conventions):\n${opts.context.join("\n---\n")}\n`
       : "";
 
+  // Phase 10: feedback hints from this team's prior reactions
+  const feedbackBlock = opts.feedbackContext ? `${opts.feedbackContext}\n` : "";
+
   return `PR: ${opts.title}
 Author: ${opts.prAuthor} | Files: ${opts.filesChanged} | +${opts.linesAdded} -${opts.linesDeleted}
-${opts.description ? `Description: ${opts.description}\n` : ""}${contextBlock}
+${opts.description ? `Description: ${opts.description}\n` : ""}${contextBlock}${feedbackBlock}
 DIFF (line numbers on left):
 \`\`\`diff
 ${processedDiff}

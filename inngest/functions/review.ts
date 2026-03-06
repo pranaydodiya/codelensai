@@ -9,6 +9,7 @@ import {
   buildReviewPrompt,
   getTokenBudget,
 } from "@/module/ai/lib/prompts";
+import { getFeedbackPromptContext } from "@/module/feedback/actions";
 
 // ─── Diff Parser: Extract file-level stats ──────────────
 function parseDiffStats(diff: string) {
@@ -126,7 +127,21 @@ export const generateReview = inngest.createFunction(
       }
     });
 
-    // Step 3: Generate AI review (enhanced prompt engineering)
+    // Step 3: Fetch feedback context from prior reviews on this repo
+    const feedbackContext = await step.run("fetch-feedback-context", async () => {
+      try {
+        const repository = await prisma.repository.findFirst({
+          where: { owner, name: repo },
+          select: { id: true },
+        });
+        if (!repository) return "";
+        return await getFeedbackPromptContext(repository.id);
+      } catch {
+        return ""; // never block the review if this fails
+      }
+    });
+
+    // Step 4: Generate AI review (enhanced prompt engineering)
     const reviewResult = await step.run("generate-ai-review", async () => {
       const startTime = Date.now();
       const diffLineCount = prData.diff.split("\n").length;
@@ -140,6 +155,7 @@ export const generateReview = inngest.createFunction(
         linesAdded: prData.linesAdded,
         linesDeleted: prData.linesDeleted,
         prAuthor: prData.prAuthor,
+        feedbackContext,
       });
 
       const text = await generateWithFallback({
