@@ -27,6 +27,7 @@ import { getReviews } from "@/module/review/actions";
 import { formatDistanceToNow } from "date-fns";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import Link from "next/link";
+import { FeedbackWidget } from "@/components/feedback-widget";
 
 const STATUS_CONFIG = {
   APPROVED: {
@@ -218,13 +219,7 @@ export default function ReviewsPage() {
                       </span>
                     )}
 
-                    {/* Model */}
-                    {detail?.modelUsed && (
-                      <span className="flex items-center gap-1 ml-auto px-2 py-0.5 rounded-full bg-indigo-500/10 text-indigo-400 border border-indigo-500/20">
-                        <Code className="h-3 w-3" />
-                        {detail.modelUsed}
-                      </span>
-                    )}
+
                   </div>
 
                   {/* Preview snippet */}
@@ -234,10 +229,11 @@ export default function ReviewsPage() {
 
                   {/* CTA */}
                   <div className="flex items-center justify-between mt-4">
-                    <div className="flex items-center gap-1 text-xs text-muted-foreground">
-                      <FileCode className="h-3.5 w-3.5" />
-                      {review._count?.fileChanges || 0} files tracked
-                    </div>
+                    <FeedbackWidget
+                      reviewId={review.id}
+                      section="overall"
+                      initialReaction={review.feedback?.[0]?.reaction ?? null}
+                    />
                     <Link href={`/dashboard/reviews/${review.id}`}>
                       <Button
                         size="sm"

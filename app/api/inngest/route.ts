@@ -4,6 +4,7 @@ import { indexRepo } from "@/inngest/functions";
 import { generateReview } from "@/inngest/functions/review";
 import { incrementalIndex } from "@/inngest/functions/incremental-index";
 import { syncIndex } from "@/inngest/functions/sync-index";
+import { aggregateFeedback } from "@/inngest/functions/aggregate-feedback";
 
 export const { GET, POST, PUT } = serve({
   client: inngest,
@@ -12,5 +13,6 @@ export const { GET, POST, PUT } = serve({
     generateReview,
     incrementalIndex,
     syncIndex,
+    aggregateFeedback,
   ],
 });

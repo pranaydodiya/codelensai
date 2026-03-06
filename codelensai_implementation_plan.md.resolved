@@ -2,14 +2,14 @@
 
 > **Project:** CodeLens AI — AI-powered GitHub PR Code Review SaaS  
 > **Stack:** Next.js 16, TypeScript, Prisma 7, PostgreSQL (Neon), BetterAuth, Inngest, Gemini AI → Ollama, Polar (billing)  
-> **Last Updated:** 2026-03-04
+> **Last Updated:** 2026-03-06
 
 ---
 
 ## 📊 Overall Progress
 
 ```
-████████████████████████████████░  ~78% Complete
+███████████████████████████████████░  ~88% Complete
 ```
 
 | Category                                         | Status             |
@@ -26,14 +26,17 @@
 | Subscription / Payments (Polar)                  | ✅ Done            |
 | Settings Page                                    | ✅ Done            |
 | PR Analytics (8 charts)                          | ✅ Done            |
+| **Engineering Analytics (Phase 9 — 5-tab dashboard)** | ✅ Done        |
 | **[REMOVED]** Teams / Orgs / Invitations / Audit | 🗑️ Removed         |
 | **GitHub Collaborator Management**               | ✅ Done            |
 | **Developer File Activity Analytics**            | ✅ Done            |
 | **Incremental Indexing + RAG Enhancements**      | ✅ Done            |
 | **Advanced Prompt Engineering (Line-Level Review)** | ✅ Done          |
+| **Self-Improving Feedback Loop (Phase 10)**      | ✅ Done            |
 | Webhook HMAC Signature Fix                       | ⚠️ Partial         |
 | Fix Fake Dashboard Data                          | ⚠️ Still mock data |
 | Ollama Migration                                 | 🔴 Not Started     |
+| AI Auto-Fix PR Generation (Phase 11)             | 🔴 Not Started     |
 | Production Hardening                             | 🔴 Not Started     |
 
 ---
@@ -490,26 +493,124 @@ Render cards with both permission info AND activity stats
 
 ---
 
-## 🔴 PHASE 9 — Real Engineering Analytics
+## ✅ PHASE 9 — Real Engineering Analytics (COMPLETE — zero cron, zero new models)
 
-> 📄 Full spec: [diff/05-feature-engineering-analytics.md](file:///c:/Users/prana/OneDrive/Desktop/codelensai/diff/05-feature-engineering-analytics.md)
+> 📄 Original spec: [diff/05-feature-engineering-analytics.md](file:///c:/Users/prana/OneDrive/Desktop/codelensai/diff/05-feature-engineering-analytics.md)  
+> **What we built:** On-demand analytics — all data from existing DB tables + AI review text parsing. No background jobs, no cron, no new Prisma models, no LLM token usage.
 
-- [ ] Add `AnalyticsSnapshot` + `FileHotspot` models
-- [ ] Hourly Inngest cron: `aggregateAnalytics`
-- [ ] Replace `generateSampleReviews()` with real DB queries
-- [ ] Risk trend chart, file hotspot table, review velocity chart
-- [ ] PRO tier gating for advanced analytics (7-day vs full history)
+### Approach: Parse Risk from Stored Review Text
+
+The AI review prompt (Phase 8) already produces structured `## Risk: X/100` output with severity-tagged issues.
+Instead of separate scoring models/cron, we **parse this at query time** via `review-parser.ts`.
+
+### Backend — Review Parser ✅
+
+**File:** [module/analytics/lib/review-parser.ts](file:///c:/Users/prana/OneDrive/Desktop/codelensai/module/analytics/lib/review-parser.ts)
+
+- [x] `parseReviewText(reviewText)` → `ParsedReview` (riskScore, riskReason, issues[], summary, criticalCount, warningCount, suggestionCount)
+- [x] `parseReviewsBatch(reviews)` — batch parser for arrays
+- [x] `getRiskLevel(score)` → `{label, color, bg}` (critical/high/medium/low)
+- [x] Regex-based extraction: `## Risk: X/100 — reason`, `- **file:line** — description`, code fix blocks
+- [x] Severity detection: critical, warning, suggestion, info — from emoji or text
+- [x] Summary extraction from `## Summary` section
+
+### Backend — New Server Actions ✅
+
+**File:** [module/analytics/actions/index.ts](file:///c:/Users/prana/OneDrive/Desktop/codelensai/module/analytics/actions/index.ts)
+
+| Function | What it does |
+|---|---|
+| `getEnhancedOverview()` | Global stats + risk metrics (avg risk, critical count, total issues) |
+| `getRiskAnalytics(days)` | Weekly risk trend, risk distribution pie, per-repo risk, top issues |
+| `getFileHotspots(repoId?, limit)` | File change aggregation + cross-referenced issues + GitHub file links |
+| `getDeveloperActivity(repoId?)` | PR count, files, lines per developer with avatar |
+| `getRepoBreakdown()` | Per-repo stats: reviews, risk, issues, indexing status, GitHub link |
+| `getReviewTimeline(days)` | Daily review volume (completed vs failed) for area charts |
+| `getHighRiskReviews(limit)` | Top riskiest PRs with parsed risk score, issues, and PR link |
+
+### Frontend — 5-Tab Analytics Dashboard ✅
+
+**File:** [app/dashboard/analytics/page.tsx](file:///c:/Users/prana/OneDrive/Desktop/codelensai/app/dashboard/analytics/page.tsx)
+
+**Layout:**
+```
+┌──────────────────────────────────────────────────────────┐
+│  Engineering Analytics                                    │
+├──────── 8 stat cards (reviews, repos, 30d, 7d, files,   │
+│         issues, avg risk, gen time)                        │
+├──────── Risk summary bar (critical + high count)          │
+├──────────────────────────────────────────────────────────┤
+│  [Overview] [Risk Analytics] [File Hotspots]              │
+│  [Developers] [Performance]                               │
+├──────────────────────────────────────────────────────────┤
+│                                                          │
+│  Tab 1 — Overview:                                       │
+│    PRs per user (bar) + Code churn (area)                │
+│    Review activity timeline (stacked area, 90d)          │
+│    Repository health table (risk badges, indexing)       │
+│                                                          │
+│  Tab 2 — Risk Analytics:                                 │
+│    Risk trend (line, weekly avg) + Distribution (pie)    │
+│    Risk by repository (horizontal bar, color-coded)      │
+│    Highest risk PRs table (score, issues, reason, link)  │
+│    Top issues found by AI (severity-coded cards)         │
+│                                                          │
+│  Tab 3 — File Hotspots:                                  │
+│    Hotspot chart (stacked bar: added/deleted)            │
+│    Detailed file table (changes, churn, issues, GitHub)  │
+│    Files per repository (grouped bar)                    │
+│                                                          │
+│  Tab 4 — Developers:                                     │
+│    Contributions bar + Code volume bar                   │
+│    Developer activity table (avatar, PRs, files, churn)  │
+│                                                          │
+│  Tab 5 — Performance:                                    │
+│    AI usage per member (bar) + Gen time trend (line)     │
+│    Review status distribution (pie) + Daily volume (area)│
+│    Most modified files table                             │
+│                                                          │
+└──────────────────────────────────────────────────────────┘
+```
+
+### Key Design Decisions
+
+| Decision | Rationale |
+|---|---|
+| No new DB models | Review text already contains risk + issues — parse don't duplicate |
+| No cron / background jobs | On-demand Prisma queries are fast enough for dashboard use |
+| No LLM token usage | All analytics from existing DB data + regex parsing |
+| 5 tabs vs single scroll | Better UX, lazy-loaded per tab via React Query |
+| GitHub file links | Direct `https://github.com/{owner}/{repo}/blob/main/{path}` links |
+| RiskBadge component | Consistent risk rendering across all tables |
+| Stacked area charts | Show completed vs failed reviews over time |
 
 ---
 
-## 🔴 PHASE 10 — Self-Improving Feedback Loop
+## ✅ PHASE 10 — Self-Improving Feedback Loop (COMPLETE)
 
 > 📄 Full spec: [diff/03-feature-self-improving-feedback-loop.md](file:///c:/Users/prana/OneDrive/Desktop/codelensai/diff/03-feature-self-improving-feedback-loop.md)
 
-- [ ] Add `ReviewFeedback` + `FeedbackAggregation` models
-- [ ] 👍👎❌💡 buttons on review cards and detail page
-- [ ] Every-6-hour Inngest cron: `aggregateFeedback`
-- [ ] Inject top-5 feedback hints into future review prompts for that repo
+- [x] `ReviewFeedback` + `FeedbackAggregation` Prisma models — pushed to Neon
+- [x] 👍👎❌💡 feedback buttons on every review card (`components/feedback-widget.tsx`)
+- [x] Feedback persists on refresh — `getReviews()` includes user's existing reaction, hydrated via `initialReaction` prop
+- [x] Filled icon state when selected (lucide `fill="currentColor"`)
+- [x] `submitFeedback()` server action with input sanitization (prompt-injection safe)
+- [x] `getFeedbackForReview()` server action — returns section→reaction map
+- [x] `getFeedbackPromptContext()` — reads aggregated hints, sanitizes before prompt injection, capped at 5 hints
+- [x] `groupByCategory()` + `generatePromptHints()` — accuracy-based hint generation (`module/feedback/lib/aggregation.ts`)
+- [x] `aggregateFeedback` Inngest cron — every 6 hours, upserts `FeedbackAggregation` per repo per category
+- [x] Review pipeline Step 3: `fetch-feedback-context` — injects team hints into `buildReviewPrompt()`
+- [x] `buildReviewPrompt()` updated with optional `feedbackContext` param — zero token cost until 3+ feedback entries exist
+
+### Key Design Decisions
+
+| Decision | Rationale |
+|---|---|
+| No LLM calls in feedback system | 100% DB + TypeScript logic — zero Gemini token cost |
+| Sanitize hints before prompt injection | Strip `<>{}` + length cap — prevents prompt injection from user comments |
+| Min 3 samples before hints activate | Avoids bad signal from single reactions |
+| `@@unique([reviewId, userId, section])` | One reaction per user per section — prevents ballot stuffing |
+| Feedback visible on refresh | `getReviews()` includes feedback relation filtered to current user |
 
 ---
 
@@ -565,7 +666,8 @@ Render cards with both permission info AND activity stats
 2. **Phase 6** — Ollama Migration (`module/llm/` abstraction layer)
 3. ~~**Phase 7** — Incremental Indexing~~ ✅ **DONE** (backend complete, UI pending)
 4. ~~**Phase 8** — Advanced AI Deep Analysis~~ ✅ **DONE** (replaced static risk engine with prompt engineering)
-5. **Phase 9** — Real Engineering Analytics (aggregated snapshots + hotspots)
+5. ~~**Phase 9** — Real Engineering Analytics~~ ✅ **DONE** (5-tab dashboard, risk parsing, zero cron)
+6. ~~**Phase 10** — Self-Improving Feedback Loop~~ ✅ **DONE** (👍👎 buttons, 6h cron, prompt injection)
 
 ---
 
@@ -580,11 +682,11 @@ GitHub Collaborator Management  ✅ COMPLETE
         ↓
   Advanced Prompt Engineering   ✅ COMPLETE (Phase 8 — line-level review, risk score, severity tiers)
         ↓
-  Real Engineering Analytics    🔴 Next (aggregated snapshots + hotspots)
+  Real Engineering Analytics    ✅ COMPLETE (Phase 9 — 5-tab dashboard, risk parsing, zero cron)
         ↓
-  Feedback Loop                 🔴 (👍👎 → prompt injection)
+  Feedback Loop                 ✅ COMPLETE (Phase 10 — 👍👎 buttons, 6h cron, prompt hints)
         ↓
-  AI Auto-Fix                   🔴 (PRO tier, needs all above)
+  AI Auto-Fix                   🔴 (Phase 11 — PRO tier, needs all above)
 ```
 
 ---
@@ -610,13 +712,18 @@ GitHub Collaborator Management  ✅ COMPLETE
 | Review Detail      | [app/dashboard/reviews/[id]/page.tsx](file:///c:/Users/prana/OneDrive/Desktop/codelensai/app/dashboard/reviews/%5Bid%5D/page.tsx)                            |
 | AI Generator       | [app/dashboard/ai-generator/page.tsx](file:///c:/Users/prana/OneDrive/Desktop/codelensai/app/dashboard/ai-generator/page.tsx)                            |
 | Collaborators ✅   | [app/dashboard/collaborators/page.tsx](file:///c:/Users/prana/OneDrive/Desktop/codelensai/app/dashboard/collaborators/page.tsx)                           |
-| Analytics          | [app/dashboard/analytics/page.tsx](file:///c:/Users/prana/OneDrive/Desktop/codelensai/app/dashboard/analytics/page.tsx)                               |
+| Analytics Page ✅  | [app/dashboard/analytics/page.tsx](file:///c:/Users/prana/OneDrive/Desktop/codelensai/app/dashboard/analytics/page.tsx)                               |
+| Review Parser ✅   | [module/analytics/lib/review-parser.ts](file:///c:/Users/prana/OneDrive/Desktop/codelensai/module/analytics/lib/review-parser.ts)                          |
 | Subscription       | [app/dashboard/subscription/page.tsx](file:///c:/Users/prana/OneDrive/Desktop/codelensai/app/dashboard/subscription/page.tsx)                            |
 | Sidebar            | [components/app-sidebar.tsx](file:///c:/Users/prana/OneDrive/Desktop/codelensai/components/app-sidebar.tsx)                                     |
 | Analytics Actions  | [module/analytics/actions/index.ts](file:///c:/Users/prana/OneDrive/Desktop/codelensai/module/analytics/actions/index.ts)                              |
 | Payment Actions    | [module/payment/actions/index.ts](file:///c:/Users/prana/OneDrive/Desktop/codelensai/module/payment/actions/index.ts)                                |
 | Collab Actions ✅  | [module/collaborator/actions/index.ts](file:///c:/Users/prana/OneDrive/Desktop/codelensai/module/collaborator/actions/index.ts)                           |
 | Collab GitHub ✅   | [module/collaborator/lib/github-collaborators.ts](file:///c:/Users/prana/OneDrive/Desktop/codelensai/module/collaborator/lib/github-collaborators.ts)                |
+| Feedback Widget ✅ | [components/feedback-widget.tsx](file:///c:/Users/prana/OneDrive/Desktop/codelensai/components/feedback-widget.tsx)                                 |
+| Feedback Actions ✅| [module/feedback/actions/index.ts](file:///c:/Users/prana/OneDrive/Desktop/codelensai/module/feedback/actions/index.ts)                               |
+| Feedback Aggregation ✅| [module/feedback/lib/aggregation.ts](file:///c:/Users/prana/OneDrive/Desktop/codelensai/module/feedback/lib/aggregation.ts)                         |
+| Feedback Cron ✅   | [inngest/functions/aggregate-feedback.ts](file:///c:/Users/prana/OneDrive/Desktop/codelensai/inngest/functions/aggregate-feedback.ts)                        |
 
 ---
 

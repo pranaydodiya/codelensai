@@ -35,6 +35,11 @@ export async function getReviews() {
           modelUsed: true,
         },
       },
+      feedback: {
+        where: { userId: session.user.id, section: "overall" },
+        select: { reaction: true },
+        take: 1,
+      },
       _count: {
         select: { fileChanges: true },
       },
