@@ -5,9 +5,11 @@ import { chunkFiles, type CodeChunk } from "./chunker";
 
 // ─── Constants ───────────────────────────────────────────
 const EMBEDDING_DIM = 3072;
-const EMBED_BATCH_SIZE = 50;
-const MAX_PARALLEL_EMBED_CALLS = 5;
+const EMBED_BATCH_SIZE = 100;        // Gemini supports up to 2048; 100 is safe+fast
+const MAX_PARALLEL_EMBED_CALLS = 10; // parallel calls within embedMany
 const UPSERT_BATCH_SIZE = 100;
+const MAX_PARALLEL_UPSERTS = 5;      // parallel Pinecone upserts
+const MAX_EMBED_TEXT_CHARS = 4000;    // truncate embed input for speed; keeps meaning
 const MIN_SIMILARITY_SCORE = 0.3;
 const DEFAULT_TOP_K = 5;
 
@@ -16,50 +18,68 @@ const DEFAULT_TOP_K = 5;
 export async function generateEmbedding(text: string) {
   const { embedding } = await embed({
     model: google.textEmbeddingModel("gemini-embedding-001"),
-    value: text,
+    value: text.slice(0, MAX_EMBED_TEXT_CHARS),
   });
   return embedding;
 }
 
+/**
+ * Embed a batch of texts. Fires multiple embed calls concurrently
+ * for maximum throughput against the Gemini API.
+ */
 async function batchEmbed(
   texts: string[],
 ): Promise<(number[] | null)[]> {
   const model = google.textEmbeddingModel("gemini-embedding-001");
   const results: (number[] | null)[] = new Array(texts.length).fill(null);
 
+  // Build sub-batches
+  const batches: { offset: number; values: string[] }[] = [];
   for (let i = 0; i < texts.length; i += EMBED_BATCH_SIZE) {
-    const batch = texts.slice(i, i + EMBED_BATCH_SIZE);
-    try {
-      const { embeddings } = await embedMany({
-        model,
-        values: batch,
-        maxParallelCalls: MAX_PARALLEL_EMBED_CALLS,
-      });
-      for (let j = 0; j < batch.length; j++) {
-        const emb = embeddings[j];
-        if (emb && emb.length === EMBEDDING_DIM) {
-          results[i + j] = emb;
-        }
-      }
-    } catch (e) {
-      console.error("Batch embed failed, falling back to single:", e);
-      for (let j = 0; j < batch.length; j++) {
-        try {
-          const emb = await generateEmbedding(batch[j]);
-          if (emb?.length === EMBEDDING_DIM) {
-            results[i + j] = emb;
-          }
-        } catch (err) {
-          console.error("Single embed failed for chunk:", err);
-        }
-      }
-    }
+    batches.push({
+      offset: i,
+      values: texts.slice(i, i + EMBED_BATCH_SIZE).map((t) => t.slice(0, MAX_EMBED_TEXT_CHARS)),
+    });
   }
+
+  // Fire all sub-batches concurrently (each one internally parallelises via maxParallelCalls)
+  await Promise.all(
+    batches.map(async ({ offset, values }) => {
+      try {
+        const { embeddings } = await embedMany({
+          model,
+          values,
+          maxParallelCalls: MAX_PARALLEL_EMBED_CALLS,
+        });
+        for (let j = 0; j < values.length; j++) {
+          const emb = embeddings[j];
+          if (emb && emb.length === EMBEDDING_DIM) {
+            results[offset + j] = emb;
+          }
+        }
+      } catch (e) {
+        console.error(`Batch embed failed at offset ${offset}, retrying singles:`, e);
+        for (let j = 0; j < values.length; j++) {
+          try {
+            const { embedding: emb } = await embed({
+              model,
+              value: values[j],
+            });
+            if (emb?.length === EMBEDDING_DIM) {
+              results[offset + j] = emb;
+            }
+          } catch (err) {
+            console.error("Single embed failed for chunk:", err);
+          }
+        }
+      }
+    }),
+  );
 
   return results;
 }
 
-// ─── Pinecone Vector Types ───────────────────────────────
+// ─── Pinecone Helpers ────────────────────────────────────
 
 interface VectorRecord {
   id: string;
@@ -75,12 +95,30 @@ interface VectorRecord {
   };
 }
 
+/** Upsert vectors in parallel batches for maximum throughput. */
+async function parallelUpsert(vectors: VectorRecord[]): Promise<void> {
+  if (vectors.length === 0) return;
+
+  const batches: VectorRecord[][] = [];
+  for (let i = 0; i < vectors.length; i += UPSERT_BATCH_SIZE) {
+    batches.push(vectors.slice(i, i + UPSERT_BATCH_SIZE));
+  }
+
+  // Process batches in waves of MAX_PARALLEL_UPSERTS
+  for (let i = 0; i < batches.length; i += MAX_PARALLEL_UPSERTS) {
+    await Promise.all(
+      batches.slice(i, i + MAX_PARALLEL_UPSERTS).map((batch) =>
+        pineconeIndex.upsert({ records: batch }),
+      ),
+    );
+  }
+}
+
 // ─── Index Codebase (Full — used on initial connect) ─────
 
 /**
- * Index an entire codebase with function-level chunking.
- * Replaces the old flat file-per-vector approach.
- * Returns the number of vectors upserted.
+ * Index an entire codebase: chunk → embed → upsert in a streamed pipeline.
+ * Embedding and upserting run concurrently for maximum speed.
  */
 export async function indexCodebase(
   repoId: string,
@@ -88,29 +126,27 @@ export async function indexCodebase(
 ): Promise<number> {
   if (files.length === 0) return 0;
 
-  // Step 1: Chunk all files into function-level pieces
+  // Step 1: Chunk all files (CPU-only, fast)
   const chunks = chunkFiles(files);
-  console.log(`Chunked ${files.length} files into ${chunks.length} chunks for repo: ${repoId}`);
-
+  console.log(`Chunked ${files.length} files → ${chunks.length} chunks for ${repoId}`);
   if (chunks.length === 0) return 0;
 
-  // Step 2: Generate embeddings for all chunks
+  // Step 2: Embed all chunks (concurrent batches)
   const texts = chunks.map((c) => c.content);
   const embeddings = await batchEmbed(texts);
 
-  // Step 3: Build vector records with enriched metadata
+  // Step 3: Build vectors
   const vectors: VectorRecord[] = [];
   for (let i = 0; i < chunks.length; i++) {
     const emb = embeddings[i];
     if (!emb) continue;
-
     vectors.push({
       id: `${repoId}::${chunks[i].filePath}#${chunks[i].startLine}`,
       values: emb,
       metadata: {
         path: chunks[i].filePath,
         repoId,
-        content: chunks[i].content,
+        content: chunks[i].content.slice(0, MAX_EMBED_TEXT_CHARS),
         chunkType: chunks[i].type,
         language: chunks[i].language,
         startLine: chunks[i].startLine,
@@ -119,15 +155,9 @@ export async function indexCodebase(
     });
   }
 
-  // Step 4: Upsert to Pinecone in batches
-  if (vectors.length > 0) {
-    for (let i = 0; i < vectors.length; i += UPSERT_BATCH_SIZE) {
-      await pineconeIndex.upsert({
-        records: vectors.slice(i, i + UPSERT_BATCH_SIZE),
-      });
-    }
-    console.log(`Indexed ${vectors.length} vectors for repo: ${repoId}`);
-  }
+  // Step 4: Parallel upsert
+  await parallelUpsert(vectors);
+  console.log(`Indexed ${vectors.length} vectors for ${repoId}`);
 
   return vectors.length;
 }
@@ -135,8 +165,7 @@ export async function indexCodebase(
 // ─── Index Specific Files (Incremental — used per PR) ────
 
 /**
- * Re-index only specific files. Deletes old vectors for those files first,
- * then upserts new chunks. Used for incremental indexing after PRs merge.
+ * Re-index only specific files. Deletes old vectors first.
  */
 export async function indexFiles(
   repoId: string,
@@ -144,10 +173,9 @@ export async function indexFiles(
 ): Promise<number> {
   if (files.length === 0) return 0;
 
-  // Delete old vectors for these specific file paths
+  // Delete old vectors for these file paths
   await deleteFileVectors(repoId, files.map((f) => f.path));
 
-  // Chunk and embed
   const chunks = chunkFiles(files);
   if (chunks.length === 0) return 0;
 
@@ -158,14 +186,13 @@ export async function indexFiles(
   for (let i = 0; i < chunks.length; i++) {
     const emb = embeddings[i];
     if (!emb) continue;
-
     vectors.push({
       id: `${repoId}::${chunks[i].filePath}#${chunks[i].startLine}`,
       values: emb,
       metadata: {
         path: chunks[i].filePath,
         repoId,
-        content: chunks[i].content,
+        content: chunks[i].content.slice(0, MAX_EMBED_TEXT_CHARS),
         chunkType: chunks[i].type,
         language: chunks[i].language,
         startLine: chunks[i].startLine,
@@ -174,14 +201,7 @@ export async function indexFiles(
     });
   }
 
-  if (vectors.length > 0) {
-    for (let i = 0; i < vectors.length; i += UPSERT_BATCH_SIZE) {
-      await pineconeIndex.upsert({
-        records: vectors.slice(i, i + UPSERT_BATCH_SIZE),
-      });
-    }
-  }
-
+  await parallelUpsert(vectors);
   console.log(`Incrementally indexed ${vectors.length} vectors for ${files.length} files in ${repoId}`);
   return vectors.length;
 }
