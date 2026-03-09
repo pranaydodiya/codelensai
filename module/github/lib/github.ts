@@ -422,7 +422,7 @@ export async function batchGetFileContents(
   owner: string,
   repo: string,
   files: { path: string; sha: string }[],
-  concurrency: number = 10,
+  concurrency: number = 25,
 ): Promise<{ path: string; content: string }[]> {
   const results: { path: string; content: string }[] = [];
 
