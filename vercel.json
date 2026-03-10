@@ -1,0 +1,13 @@
+{
+  "functions": {
+    "app/api/inngest/route.ts": {
+      "maxDuration": 300
+    },
+    "app/api/webhooks/github/route.ts": {
+      "maxDuration": 10
+    },
+    "app/api/ai/**/*.ts": {
+      "maxDuration": 60
+    }
+  }
+}

@@ -3,6 +3,7 @@ import { getPullRequestDiff, postReviewComment } from "@/module/github/lib/githu
 import { retrieveContext, buildRetrievalQuery } from "@/module/ai/lib/rag";
 import { generateWithFallback, DEFAULT_MODEL } from "@/module/ai/lib/gemini";
 import prisma from "@/lib/db";
+import { decrypt } from "@/lib/encryption";
 import { Octokit } from "octokit";
 import {
   REVIEW_1_SYSTEM_PROMPT,
@@ -67,7 +68,7 @@ export const generateReview = inngest.createFunction(
         throw new Error("No GitHub access token found");
       }
 
-      const octokit = new Octokit({ auth: account.accessToken });
+      const octokit = new Octokit({ auth: decrypt(account.accessToken) });
 
       // Fetch PR metadata including author
       const { data: pr } = await octokit.rest.pulls.get({
@@ -96,7 +97,7 @@ export const generateReview = inngest.createFunction(
         diff: diff as unknown as string,
         title: pr.title,
         description: pr.body || "",
-        token: account.accessToken,
+        token: decrypt(account.accessToken),
         prAuthor: pr.user?.login || "unknown",
         prAuthorAvatar: pr.user?.avatar_url || null,
         filesChanged: prFiles.length,
