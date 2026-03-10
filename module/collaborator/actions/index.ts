@@ -3,6 +3,7 @@
 import prisma from "@/lib/db";
 import { auth } from "@/lib/auth";
 import { headers } from "next/headers";
+import { decrypt } from "@/lib/encryption";
 import {
   listCollaborators,
   addCollaborator as ghAddCollaborator,
@@ -28,7 +29,7 @@ async function getGithubToken(userId: string): Promise<string> {
     where: { userId, providerId: "github" },
   });
   if (!account?.accessToken) throw new Error("No GitHub access token found");
-  return account.accessToken;
+  return decrypt(account.accessToken);
 }
 
 async function getRepoById(repoId: string, userId: string) {

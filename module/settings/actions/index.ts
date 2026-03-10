@@ -5,6 +5,13 @@ import { headers } from "next/headers";
 import prisma from "@/lib/db";
 import {revalidatePath} from "next/cache";
 import { deleteWebhook } from "@/module/github/lib/github";
+import { z } from "zod";
+
+const profileSchema = z.object({
+    name: z.string().min(1).max(100).optional(),
+    email: z.string().email().max(255).optional(),
+    image: z.string().url().max(500).optional(),
+});
 
 export async function getUserProfile(){
     try{
@@ -40,9 +47,16 @@ export async function updateUserProfile(data: {name?: string; image?: string;ema
         if(!session?.user?.id){
             return { success: false, error: "Unauthorized" };
         }
+
+        // Validate input
+        const parsed = profileSchema.safeParse(data);
+        if (!parsed.success) {
+            return { success: false, error: "Invalid input: " + parsed.error.issues.map(i => i.message).join(", ") };
+        }
+
         const updateData: { name?: string; email?: string } = {};
-        if (data.name !== undefined) updateData.name = data.name;
-        if (data.email !== undefined) updateData.email = data.email;
+        if (parsed.data.name !== undefined) updateData.name = parsed.data.name;
+        if (parsed.data.email !== undefined) updateData.email = parsed.data.email;
         if (Object.keys(updateData).length === 0) {
             return { success: false, error: "No data to update" };
         }

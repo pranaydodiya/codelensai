@@ -1,5 +1,6 @@
 import { inngest } from "../client";
 import prisma from "@/lib/db";
+import { decrypt } from "@/lib/encryption";
 import {
   getRepoTree,
   batchGetFileContents,
@@ -49,7 +50,7 @@ export const indexRepo = inngest.createFunction(
       }
 
       return {
-        token: account.accessToken,
+        token: decrypt(account.accessToken),
         repositoryId: repository?.id ?? null,
       };
     });
