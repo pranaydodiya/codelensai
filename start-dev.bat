@@ -15,13 +15,9 @@ echo Done.
 echo.
 
 echo [3/3] Testing database connection...
-ping -n 1 ep-wild-bread-ai1qrdld-pooler.c-4.us-east-1.aws.neon.tech > nul 2>&1
-if %errorlevel% == 0 (
-    echo Database host reachable!
-) else (
-    echo WARNING: Database host not reachable yet. Will retry automatically via app.
-    echo If this persists, check your internet connection.
-)
+REM Extract host from DATABASE_URL env var at runtime — do not hardcode credentials
+echo Checking database connectivity via app retry logic...
+echo Database connection will be verified when the app starts.
 echo.
 
 echo ==========================================

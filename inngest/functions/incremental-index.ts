@@ -1,5 +1,6 @@
 import { inngest } from "../client";
 import prisma from "@/lib/db";
+import { decrypt } from "@/lib/encryption";
 import {
   compareCommits,
   batchGetFileContents,
@@ -43,7 +44,7 @@ export const incrementalIndex = inngest.createFunction(
       }
 
       return {
-        token: account.accessToken,
+        token: decrypt(account.accessToken),
         repositoryId: repository.id,
         lastCommitSHA: repository.indexingState?.lastCommitSHA ?? null,
         currentStatus: repository.indexingState?.status ?? null,

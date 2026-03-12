@@ -48,6 +48,7 @@ next-env.d.ts
 
 # Transcript files
 coderabbit_transcript.txt
+implementationplan.md
 
 # VS Code Local History extension
 .history/

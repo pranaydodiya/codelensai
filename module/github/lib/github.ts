@@ -2,6 +2,7 @@ import { Octokit } from "octokit";
 import { auth } from "@/lib/auth";
 import prisma from "@/lib/db";
 import { headers } from "next/headers";
+import { decrypt } from "@/lib/encryption";
 
 /* ================= GET GITHUB TOKEN ================= */
 
@@ -25,7 +26,7 @@ export const getGithubToken = async () => {
     throw new Error("No GitHub access token found");
   }
 
-  return account.accessToken;
+  return decrypt(account.accessToken);
 };
 
 /* ================= TYPES ================= */
@@ -183,6 +184,7 @@ export const createWebhook = async (owner: string, repo: string) => {
     config: {
       url: webhookUrl,
       content_type: "json",
+      secret: process.env.GITHUB_WEBHOOK_SECRET || undefined,
     },
     events: ["pull_request"],
   });
@@ -422,7 +424,7 @@ export async function batchGetFileContents(
   owner: string,
   repo: string,
   files: { path: string; sha: string }[],
-  concurrency: number = 10,
+  concurrency: number = 25,
 ): Promise<{ path: string; content: string }[]> {
   const results: { path: string; content: string }[] = [];
 

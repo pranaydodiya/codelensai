@@ -1,5 +1,6 @@
 import { inngest } from "../client";
 import prisma from "@/lib/db";
+import { decrypt } from "@/lib/encryption";
 import {
   getRepoTree,
   batchGetFileContents,
@@ -49,7 +50,7 @@ export const indexRepo = inngest.createFunction(
       }
 
       return {
-        token: account.accessToken,
+        token: decrypt(account.accessToken),
         repositoryId: repository?.id ?? null,
       };
     });
@@ -77,13 +78,17 @@ export const indexRepo = inngest.createFunction(
       return await batchGetFileContents(token, owner, repo, filesToIndex);
     });
 
-    // Step 5: Clear old vectors and index fresh with function-level chunks
-    const vectorCount = await step.run("index-codebase", async () => {
+    // Step 5: Delete old vectors (separate step for retry isolation)
+    await step.run("delete-old-vectors", async () => {
       await deleteRepoVectors(repoId);
+    });
+
+    // Step 6: Index fresh with function-level chunks + concurrent embeddings
+    const vectorCount = await step.run("index-codebase", async () => {
       return await indexCodebase(repoId, files);
     });
 
-    // Step 6: Update indexing state with success
+    // Step 7: Update indexing state with success
     await step.run("finalize-indexing", async () => {
       if (!repositoryId) return;
 

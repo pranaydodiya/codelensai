@@ -11,6 +11,8 @@ const EMBED_BATCH_SIZE = 10;           // Keep small to stay under 100 RPM free-
 const MAX_PARALLEL_EMBED_CALLS = 2;    // 2 parallel × 10 batch = ~20 API calls/batch
 const INTER_BATCH_DELAY_MS = 3_000;    // Throttle: pause between batches to spread load
 const UPSERT_BATCH_SIZE = 100;
+const MAX_PARALLEL_UPSERTS = 5;      // parallel Pinecone upserts
+const MAX_EMBED_TEXT_CHARS = 4000;    // truncate embed input for speed; keeps meaning
 const MIN_SIMILARITY_SCORE = 0.3;
 const DEFAULT_TOP_K = 5;
 
@@ -118,6 +120,8 @@ async function batchEmbed(texts: string[], taskType: "RETRIEVAL_DOCUMENT" | "COD
   let failed = 0;
   const totalBatches = Math.ceil(texts.length / EMBED_BATCH_SIZE);
 
+  // Build sub-batches
+  const batches: { offset: number; values: string[] }[] = [];
   for (let i = 0; i < texts.length; i += EMBED_BATCH_SIZE) {
     const batchIdx = Math.floor(i / EMBED_BATCH_SIZE) + 1;
     const batch = texts.slice(i, i + EMBED_BATCH_SIZE);
@@ -168,13 +172,13 @@ async function batchEmbed(texts: string[], taskType: "RETRIEVAL_DOCUMENT" | "COD
           failed++;
         }
       }
-    }
-  }
+    }),
+  );
 
   return { embeddings, succeeded, failed };
 }
 
-// ─── Pinecone Vector Types ───────────────────────────────
+// ─── Pinecone Helpers ────────────────────────────────────
 
 interface VectorRecord {
   id: string;
@@ -194,12 +198,30 @@ interface VectorRecord {
   };
 }
 
+/** Upsert vectors in parallel batches for maximum throughput. */
+async function parallelUpsert(vectors: VectorRecord[]): Promise<void> {
+  if (vectors.length === 0) return;
+
+  const batches: VectorRecord[][] = [];
+  for (let i = 0; i < vectors.length; i += UPSERT_BATCH_SIZE) {
+    batches.push(vectors.slice(i, i + UPSERT_BATCH_SIZE));
+  }
+
+  // Process batches in waves of MAX_PARALLEL_UPSERTS
+  for (let i = 0; i < batches.length; i += MAX_PARALLEL_UPSERTS) {
+    await Promise.all(
+      batches.slice(i, i + MAX_PARALLEL_UPSERTS).map((batch) =>
+        pineconeIndex.upsert({ records: batch }),
+      ),
+    );
+  }
+}
+
 // ─── Index Codebase (Full — used on initial connect) ─────
 
 /**
- * Index an entire codebase with function-level chunking.
- * Replaces the old flat file-per-vector approach.
- * Returns the number of vectors upserted.
+ * Index an entire codebase: chunk → embed → upsert in a streamed pipeline.
+ * Embedding and upserting run concurrently for maximum speed.
  */
 export async function indexCodebase(
   repoId: string,
@@ -207,10 +229,9 @@ export async function indexCodebase(
 ): Promise<number> {
   if (files.length === 0) return 0;
 
-  // Step 1: Chunk all files into function-level pieces
+  // Step 1: Chunk all files (CPU-only, fast)
   const chunks = chunkFiles(files);
-  console.log(`Chunked ${files.length} files into ${chunks.length} chunks for repo: ${repoId}`);
-
+  console.log(`Chunked ${files.length} files → ${chunks.length} chunks for ${repoId}`);
   if (chunks.length === 0) return 0;
 
   // Step 2: Deduplicate by content hash — skip chunks already embedded
@@ -226,14 +247,13 @@ export async function indexCodebase(
   for (let i = 0; i < chunks.length; i++) {
     const emb = embeddings[i];
     if (!emb) continue;
-
     vectors.push({
       id: `${repoId}::${chunks[i].filePath}#${chunks[i].startLine}`,
       values: emb,
       metadata: {
         path: chunks[i].filePath,
         repoId,
-        content: chunks[i].content,
+        content: chunks[i].content.slice(0, MAX_EMBED_TEXT_CHARS),
         chunkType: chunks[i].type,
         language: chunks[i].language,
         startLine: chunks[i].startLine,
@@ -263,8 +283,7 @@ export async function indexCodebase(
 // ─── Index Specific Files (Incremental — used per PR) ────
 
 /**
- * Re-index only specific files. Deletes old vectors for those files first,
- * then upserts new chunks. Used for incremental indexing after PRs merge.
+ * Re-index only specific files. Deletes old vectors first.
  */
 export async function indexFiles(
   repoId: string,
@@ -272,10 +291,9 @@ export async function indexFiles(
 ): Promise<number> {
   if (files.length === 0) return 0;
 
-  // Delete old vectors for these specific file paths
+  // Delete old vectors for these file paths
   await deleteFileVectors(repoId, files.map((f) => f.path));
 
-  // Chunk and embed
   const chunks = chunkFiles(files);
   if (chunks.length === 0) return 0;
 
@@ -288,14 +306,13 @@ export async function indexFiles(
   for (let i = 0; i < chunks.length; i++) {
     const emb = embeddings[i];
     if (!emb) continue;
-
     vectors.push({
       id: `${repoId}::${chunks[i].filePath}#${chunks[i].startLine}`,
       values: emb,
       metadata: {
         path: chunks[i].filePath,
         repoId,
-        content: chunks[i].content,
+        content: chunks[i].content.slice(0, MAX_EMBED_TEXT_CHARS),
         chunkType: chunks[i].type,
         language: chunks[i].language,
         startLine: chunks[i].startLine,

@@ -3,11 +3,14 @@ import { getPullRequestDiff, postReviewComment } from "@/module/github/lib/githu
 import { retrieveContext, buildRetrievalQuery } from "@/module/ai/lib/rag";
 import { generateWithFallback, DEFAULT_MODEL } from "@/module/ai/lib/gemini";
 import prisma from "@/lib/db";
+import { decrypt } from "@/lib/encryption";
 import { Octokit } from "octokit";
 import {
-  REVIEW_SYSTEM_PROMPT,
+  REVIEW_1_SYSTEM_PROMPT,
+  REVIEW_2_SYSTEM_PROMPT,
   buildReviewPrompt,
-  getTokenBudget,
+  mergeReviews,
+  getAgentTokenBudget,
 } from "@/module/ai/lib/prompts";
 import { getFeedbackPromptContext } from "@/module/feedback/actions";
 
@@ -65,7 +68,7 @@ export const generateReview = inngest.createFunction(
         throw new Error("No GitHub access token found");
       }
 
-      const octokit = new Octokit({ auth: account.accessToken });
+      const octokit = new Octokit({ auth: decrypt(account.accessToken) });
 
       // Fetch PR metadata including author
       const { data: pr } = await octokit.rest.pulls.get({
@@ -94,7 +97,7 @@ export const generateReview = inngest.createFunction(
         diff: diff as unknown as string,
         title: pr.title,
         description: pr.body || "",
-        token: account.accessToken,
+        token: decrypt(account.accessToken),
         prAuthor: pr.user?.login || "unknown",
         prAuthorAvatar: pr.user?.avatar_url || null,
         filesChanged: prFiles.length,
@@ -141,7 +144,12 @@ export const generateReview = inngest.createFunction(
       }
     });
 
-    // Step 4: Generate AI review (enhanced prompt engineering)
+    // Step 4: Generate AI review (Multi-Agent — 2 parallel Gemini calls)
+    //
+    // Agent 1: ⚡ Performance + 🏗️ Architecture + 📐 Style
+    // Agent 2: 🔒 Security + 🐛 Bug Detection + 📝 Summary
+    //
+    // Both run simultaneously via Promise.all for speed.
     const reviewResult = await step.run("generate-ai-review", async () => {
       const startTime = Date.now();
       const diffLineCount = prData.diff.split("\n").length;
@@ -158,14 +166,30 @@ export const generateReview = inngest.createFunction(
         feedbackContext,
       });
 
-      const text = await generateWithFallback({
-        modelId: DEFAULT_MODEL,
-        system: REVIEW_SYSTEM_PROMPT,
-        prompt,
-        maxOutputTokens: getTokenBudget(diffLineCount),
-        temperature: 0.2, // low = focused, consistent, less hallucination
-      });
+      const tokenBudget = getAgentTokenBudget(diffLineCount);
 
+      // Run 2 specialized agents in parallel for faster + deeper analysis
+      const [agent1Text, agent2Text] = await Promise.all([
+        // Agent 1: Performance, Architecture & Style
+        generateWithFallback({
+          modelId: DEFAULT_MODEL,
+          system: REVIEW_1_SYSTEM_PROMPT,
+          prompt,
+          maxOutputTokens: tokenBudget,
+          temperature: 0.2,
+        }),
+        // Agent 2: Security, Bug Detection & Summary
+        generateWithFallback({
+          modelId: DEFAULT_MODEL,
+          system: REVIEW_2_SYSTEM_PROMPT,
+          prompt,
+          maxOutputTokens: tokenBudget,
+          temperature: 0.2,
+        }),
+      ]);
+
+      // Merge both agent outputs into one unified review
+      const text = mergeReviews(agent1Text, agent2Text);
       const generationTimeMs = Date.now() - startTime;
 
       return { text, generationTimeMs };
@@ -203,7 +227,7 @@ export const generateReview = inngest.createFunction(
           prAuthor: prData.prAuthor,
           prAuthorAvatar: prData.prAuthorAvatar,
           reviewGenerator: "ai",
-          modelUsed: "gemini-2.5-flash",
+          modelUsed: "gemini-2.5-flash-multi-agent",
           generationTimeMs: reviewResult.generationTimeMs,
           ragContextUsed: context.length > 0 ? context.join("\n---\n") : null,
           diffContent: prData.diff,
