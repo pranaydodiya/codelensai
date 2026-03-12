@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { generateWithFallback, resolveModel } from "@/module/ai/lib/gemini";
+import { generateForTools, resolveModel } from "@/module/ai/lib/gemini";
 import { auth } from "@/lib/auth";
 import { headers } from "next/headers";
 import { rateLimit } from "@/lib/rate-limit";
@@ -22,9 +22,11 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: "Too many requests" }, { status: 429 });
     }
 
+    // API key check
     if (!process.env.GEMINI_API_KEY?.trim() && !process.env.GEMINI_BACKUP_API_KEY?.trim()) {
       return NextResponse.json({ error: "AI service unavailable" }, { status: 503 });
     }
+
     const body = await req.json();
     const messages = body?.messages;
     const systemPrompt = body?.systemPrompt;
@@ -44,7 +46,7 @@ export async function POST(req: NextRequest) {
         ? [{ role: "system" as const, content: String(systemPrompt).slice(0, MAX_SYSTEM) }, ...trimmed]
         : trimmed;
 
-    const text = await generateWithFallback({
+    const text = await generateForTools({
       modelId: resolveModel(model),
       messages: all,
       maxOutputTokens: 2048,

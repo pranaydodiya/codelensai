@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { generateWithFallback, DEFAULT_MODEL } from "@/module/ai/lib/gemini";
+import { generateForTools, DEFAULT_MODEL } from "@/module/ai/lib/gemini";
 import { auth } from "@/lib/auth";
 import { headers } from "next/headers";
 import { rateLimit } from "@/lib/rate-limit";
@@ -20,9 +20,11 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: "Too many requests" }, { status: 429 });
     }
 
+    // API key check
     if (!process.env.GEMINI_API_KEY?.trim() && !process.env.GEMINI_BACKUP_API_KEY?.trim()) {
       return NextResponse.json({ error: "AI service unavailable" }, { status: 503 });
     }
+
     const body = await req.json();
     const code = body?.code?.trim();
     const language = body?.language || "code";
@@ -32,9 +34,13 @@ export async function POST(req: NextRequest) {
     }
 
     const trimmed = code.slice(0, MAX_CODE);
-    const prompt = `Summarize this ${language} in markdown. Short: purpose, how it works, main points, issues. Be brief.\n\`\`\`\n${trimmed}\n\`\`\``;
 
-    const text = await generateWithFallback({
+    const prompt = `Summarize this ${language} in markdown. Short: purpose, how it works, main points, issues. Be brief.
+\`\`\`
+${trimmed}
+\`\`\``;
+
+    const text = await generateForTools({
       modelId: DEFAULT_MODEL,
       prompt,
       maxOutputTokens: 1024,
@@ -47,6 +53,10 @@ export async function POST(req: NextRequest) {
     });
   } catch (error: unknown) {
     console.error("[AI Summarize]", error instanceof Error ? error.message : error);
-    return NextResponse.json({ error: "Failed to summarize code" }, { status: 500 });
+
+    return NextResponse.json(
+      { error: "Failed to summarize code" },
+      { status: 500 }
+    );
   }
 }
