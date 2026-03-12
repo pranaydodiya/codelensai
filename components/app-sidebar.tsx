@@ -14,6 +14,7 @@ import {
   CreditCard,
   BarChart3,
   Users,
+  CodeXml,
 } from "lucide-react";
 
 import { useEffect, useState } from "react";
@@ -90,6 +91,12 @@ const navigationItems = [
     group: "main",
   },
   // AI Tools
+  {
+    title: "Live Editor",
+    url: "/dashboard/editor",
+    icon: CodeXml,
+    group: "ai",
+  },
   {
     title: "AI Code Summary",
     url: "/dashboard/ai-summary",

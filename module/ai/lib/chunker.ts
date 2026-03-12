@@ -18,6 +18,12 @@ export interface CodeChunk {
   endLine: number;
   /** Language detected from extension */
   language: string;
+  /** Primary symbol name (function/class/interface) if detected */
+  symbolName?: string;
+  /** Whether this chunk contains exports */
+  hasExports?: boolean;
+  /** Simple complexity estimate (branch count) */
+  complexity?: number;
 }
 
 const MAX_CHUNK_CHARS = 6000;
@@ -290,8 +296,57 @@ export function chunkFiles(
 
   for (const file of files) {
     const fileChunks = chunkFile(file.path, file.content);
-    allChunks.push(...fileChunks);
+    for (const chunk of fileChunks) {
+      allChunks.push(enrichChunk(chunk));
+    }
   }
 
   return allChunks;
+}
+
+// ─── Metadata Enrichment Helpers ─────────────────────────
+
+/** Extract the primary symbol name from a code block's first meaningful line. */
+function extractSymbolName(content: string): string | undefined {
+  const lines = content.split("\n");
+  for (const line of lines) {
+    const trimmed = line.trim();
+    // function foo / async function foo
+    const fnMatch = trimmed.match(/(?:async\s+)?function\s+(\w+)/);
+    if (fnMatch) return fnMatch[1];
+    // const foo = / let foo = (arrow fns)
+    const arrowMatch = trimmed.match(/(?:export\s+)?(?:const|let|var)\s+(\w+)\s*=/);
+    if (arrowMatch && (trimmed.includes("=>") || trimmed.includes("function"))) return arrowMatch[1];
+    // class Foo / interface Foo / type Foo / enum Foo
+    const classMatch = trimmed.match(/(?:export\s+)?(?:class|interface|type|enum|struct|trait)\s+(\w+)/);
+    if (classMatch) return classMatch[1];
+    // def foo (Python) / func foo (Go) / fn foo (Rust)
+    const otherMatch = trimmed.match(/(?:pub\s+)?(?:async\s+)?(?:def|func|fn)\s+(\w+)/);
+    if (otherMatch) return otherMatch[1];
+  }
+  return undefined;
+}
+
+/** Check whether a chunk contains export statements. */
+function hasExportStatements(content: string): boolean {
+  return /(?:^|\n)\s*export\s+/.test(content);
+}
+
+/**
+ * Estimate cyclomatic complexity by counting branch points.
+ * Simple heuristic: count if/else/for/while/switch/catch/&&/||/?.
+ */
+function estimateComplexity(content: string): number {
+  const branchPatterns = /\b(?:if|else if|for|while|switch|catch|case)\b|\?\.|&&|\|\||\?\s*:/g;
+  const matches = content.match(branchPatterns);
+  return (matches?.length ?? 0) + 1; // base complexity of 1
+}
+
+/** Enrich a chunk with symbolName, hasExports, complexity fields. */
+function enrichChunk(chunk: CodeChunk): CodeChunk {
+  const raw = chunk.content.split("\n\n").slice(1).join("\n\n"); // strip "File: ..." prefix line
+  chunk.symbolName = extractSymbolName(raw);
+  chunk.hasExports = hasExportStatements(raw);
+  chunk.complexity = estimateComplexity(raw);
+  return chunk;
 }

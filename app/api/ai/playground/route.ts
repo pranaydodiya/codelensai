@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { generateWithFallback, resolveModel } from "@/module/ai/lib/gemini";
+import { generateForTools, resolveModel } from "@/module/ai/lib/gemini";
 
 const MAX_SYSTEM = 500;
 const MAX_MSG = 1200;
@@ -7,8 +7,8 @@ const MAX_TURNS = 3;
 
 export async function POST(req: NextRequest) {
   try {
-    if (!process.env.GEMINI_API_KEY?.trim() && !process.env.GEMINI_BACKUP_API_KEY?.trim()) {
-      return NextResponse.json({ error: "GEMINI_API_KEY or GEMINI_BACKUP_API_KEY is required" }, { status: 500 });
+    if (!process.env.GEMINI_AI_TOOLS_API_KEY?.trim() && !process.env.GEMINI_BACKUP_API_KEY?.trim()) {
+      return NextResponse.json({ error: "GEMINI_AI_TOOLS_API_KEY or GEMINI_BACKUP_API_KEY is required" }, { status: 500 });
     }
     const body = await req.json();
     const messages = body?.messages;
@@ -29,7 +29,7 @@ export async function POST(req: NextRequest) {
         ? [{ role: "system" as const, content: String(systemPrompt).slice(0, MAX_SYSTEM) }, ...trimmed]
         : trimmed;
 
-    const text = await generateWithFallback({
+    const text = await generateForTools({
       modelId: resolveModel(model),
       messages: all,
       maxOutputTokens: 2048,

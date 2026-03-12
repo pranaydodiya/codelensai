@@ -1,12 +1,12 @@
 import { NextRequest, NextResponse } from "next/server";
-import { generateWithFallback, DEFAULT_MODEL } from "@/module/ai/lib/gemini";
+import { generateForTools, DEFAULT_MODEL } from "@/module/ai/lib/gemini";
 
 const MAX_CODE = 4000;
 
 export async function POST(req: NextRequest) {
   try {
-    if (!process.env.GEMINI_API_KEY?.trim() && !process.env.GEMINI_BACKUP_API_KEY?.trim()) {
-      return NextResponse.json({ error: "GEMINI_API_KEY or GEMINI_BACKUP_API_KEY is required" }, { status: 500 });
+    if (!process.env.GEMINI_AI_TOOLS_API_KEY?.trim() && !process.env.GEMINI_BACKUP_API_KEY?.trim()) {
+      return NextResponse.json({ error: "GEMINI_AI_TOOLS_API_KEY or GEMINI_BACKUP_API_KEY is required" }, { status: 500 });
     }
     const body = await req.json();
     const code = body?.code?.trim();
@@ -19,7 +19,7 @@ export async function POST(req: NextRequest) {
     const trimmed = code.slice(0, MAX_CODE);
     const prompt = `Summarize this ${language} in markdown. Short: purpose, how it works, main points, issues. Be brief.\n\`\`\`\n${trimmed}\n\`\`\``;
 
-    const text = await generateWithFallback({
+    const text = await generateForTools({
       modelId: DEFAULT_MODEL,
       prompt,
       maxOutputTokens: 1024,

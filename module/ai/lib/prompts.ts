@@ -13,6 +13,14 @@
 // ─── System Prompt (role + rules + output contract) ─────────
 export const REVIEW_SYSTEM_PROMPT = `You are CodeLens AI — a senior staff engineer doing code review.
 
+THINKING PROCESS (internal — do not output this section):
+Before writing your review, silently perform these steps:
+1. Classify the PR: bug fix, feature, refactor, config change, or mixed
+2. Identify the blast radius: which systems/modules are affected
+3. Scan for the top-3 riskiest changes (security, data loss, correctness)
+4. Check whether the changes align with the codebase context patterns
+5. Only then compose your review
+
 RULES:
 1. Every issue MUST cite exact file and line(s): \`path/file.ts:42\` or \`path/file.ts:42-58\`
 2. Every issue MUST include a concrete fix (show corrected code)
@@ -24,6 +32,8 @@ RULES:
 8. If no issues found in a file, skip it entirely — do not mention clean files
 9. Keep total response under 800 words for PRs < 300 lines, under 1500 words for larger PRs
 10. Use the codebase context to validate patterns — flag deviations from existing conventions
+11. Consider the FULL dependency chain — does the change break callers/consumers?
+12. For security issues, reference the relevant OWASP category
 
 OUTPUT FORMAT — follow this EXACT structure:
 
@@ -173,6 +183,37 @@ export function getTokenBudget(diffLineCount: number): number {
   return 8000; // 1500+ line PRs
 }
 
+// ─── Token-Aware Context Injection ──────────────────────────
+// Estimate ~3.5 chars per token (conservative for code).
+// Budget allocation: 60% diff, 25% context, 10% prompt chrome, 5% feedback.
+const CHARS_PER_TOKEN = 3.5;
+
+/**
+ * Trim context blocks to fit within a token budget.
+ * Prioritizes shorter, high-signal chunks (already ranked by relevance from RAG).
+ * Per prompt-engineering skill: "Manage context window precisely".
+ */
+function trimContextToFit(contexts: string[], maxTokens: number): string[] {
+  const maxChars = maxTokens * CHARS_PER_TOKEN;
+  const result: string[] = [];
+  let totalChars = 0;
+
+  for (const ctx of contexts) {
+    if (totalChars + ctx.length > maxChars) {
+      // If we can fit a truncated version, include it
+      const remaining = maxChars - totalChars;
+      if (remaining > 200) {
+        result.push(ctx.slice(0, remaining) + "\n... (truncated)");
+      }
+      break;
+    }
+    result.push(ctx);
+    totalChars += ctx.length;
+  }
+
+  return result;
+}
+
 // ─── Build the User Prompt ──────────────────────────────────
 export function buildReviewPrompt(opts: {
   title: string;
@@ -186,16 +227,29 @@ export function buildReviewPrompt(opts: {
   feedbackContext?: string; // Phase 10: optional prompt hints from prior feedback
 }): string {
   const diffLines = opts.diff.split("\n").length;
+  const outputBudget = getTokenBudget(diffLines);
+
+  // Estimate total input token budget: ~30k tokens for Gemini Flash, reserve output
+  const totalInputBudget = 28_000;
+  const diffTokens = Math.ceil(opts.diff.length / CHARS_PER_TOKEN);
+  const promptChromeTokens = 500; // fixed overhead for PR metadata, instructions
+  const feedbackTokens = opts.feedbackContext ? Math.ceil(opts.feedbackContext.length / CHARS_PER_TOKEN) : 0;
+
+  // Context gets whatever's left after diff + chrome + feedback
+  const contextBudget = Math.max(0, totalInputBudget - diffTokens - promptChromeTokens - feedbackTokens - outputBudget);
 
   // Compress if huge, then annotate with line numbers
   const processedDiff = annotateDiffWithLineNumbers(
     diffLines > 4000 ? compressDiff(opts.diff) : opts.diff
   );
 
+  // Token-aware context injection — trim to fit budget
+  const trimmedContext = trimContextToFit(opts.context, contextBudget);
+
   // Build compact context block — only include if non-empty
   const contextBlock =
-    opts.context.length > 0
-      ? `\nCODEBASE CONTEXT (existing patterns — match these conventions):\n${opts.context.join("\n---\n")}\n`
+    trimmedContext.length > 0
+      ? `\nCODEBASE CONTEXT (existing patterns — match these conventions):\n${trimmedContext.join("\n---\n")}\n`
       : "";
 
   // Phase 10: feedback hints from this team's prior reactions

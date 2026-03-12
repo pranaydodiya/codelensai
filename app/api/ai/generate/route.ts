@@ -1,12 +1,12 @@
 import { NextRequest, NextResponse } from "next/server";
-import { generateWithFallback, DEFAULT_MODEL } from "@/module/ai/lib/gemini";
+import { generateForTools, DEFAULT_MODEL } from "@/module/ai/lib/gemini";
 
 const MAX_PROMPT = 1500;
 
 export async function POST(req: NextRequest) {
   try {
-    if (!process.env.GEMINI_API_KEY?.trim() && !process.env.GEMINI_BACKUP_API_KEY?.trim()) {
-      return NextResponse.json({ error: "GEMINI_API_KEY or GEMINI_BACKUP_API_KEY is required" }, { status: 500 });
+    if (!process.env.GEMINI_AI_TOOLS_API_KEY?.trim() && !process.env.GEMINI_BACKUP_API_KEY?.trim()) {
+      return NextResponse.json({ error: "GEMINI_AI_TOOLS_API_KEY or GEMINI_BACKUP_API_KEY is required" }, { status: 500 });
     }
     const body = await req.json();
     const prompt = body?.prompt?.trim();
@@ -19,7 +19,7 @@ export async function POST(req: NextRequest) {
     const userPrompt = prompt.slice(0, MAX_PROMPT);
     const system = `Expert ${language} dev. Reply with ONLY one \`\`\`${language}\`\`\` code block. No extra text.`;
 
-    const text = await generateWithFallback({
+    const text = await generateForTools({
       modelId: DEFAULT_MODEL,
       system,
       prompt: userPrompt,
