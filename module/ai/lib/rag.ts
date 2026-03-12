@@ -1,85 +1,223 @@
-import { pineconeIndex } from "@/lib/pinecone";
+import { getRepoNamespace } from "@/lib/pinecone";
 import { embed, embedMany } from "ai";
 import { google } from "@ai-sdk/google";
+import { createHash } from "crypto";
 import { chunkFiles, type CodeChunk } from "./chunker";
 
 // ─── Constants ───────────────────────────────────────────
+const EMBEDDING_MODEL = "gemini-embedding-2-preview"; // Switched from embedding-001 (separate quota bucket)
 const EMBEDDING_DIM = 3072;
-const EMBED_BATCH_SIZE = 100;        // Gemini supports up to 2048; 100 is safe+fast
-const MAX_PARALLEL_EMBED_CALLS = 10; // parallel calls within embedMany
+const EMBED_BATCH_SIZE = 10;           // Keep small to stay under 100 RPM free-tier limit
+const MAX_PARALLEL_EMBED_CALLS = 2;    // 2 parallel × 10 batch = ~20 API calls/batch
+const INTER_BATCH_DELAY_MS = 3_000;    // Throttle: pause between batches to spread load
 const UPSERT_BATCH_SIZE = 100;
-const MAX_PARALLEL_UPSERTS = 5;      // parallel Pinecone upserts
-const MAX_EMBED_TEXT_CHARS = 4000;    // truncate embed input for speed; keeps meaning
 const MIN_SIMILARITY_SCORE = 0.3;
 const DEFAULT_TOP_K = 5;
 
-// ─── Embedding Functions ─────────────────────────────────
+// Retry / backoff constants (per gemini-api-integration skill)
+const MAX_RETRIES = 5;
+const BASE_DELAY_MS = 2_000;
+const MAX_DELAY_MS = 65_000;           // Must exceed Gemini's "retry in 53s" suggestion
 
-export async function generateEmbedding(text: string) {
-  const { embedding } = await embed({
-    model: google.textEmbeddingModel("gemini-embedding-001"),
-    value: text.slice(0, MAX_EMBED_TEXT_CHARS),
-  });
-  return embedding;
+/**
+ * Detects whether an error likely represents a rate limit or transient server condition.
+ *
+ * Examines the error or value's message/text for common indicators of rate limiting, quota exhaustion, service unavailability, or timeouts.
+ *
+ * @returns `true` if the error message contains indicators like "429", "rate", "quota", "resource exhausted", "503", "unavailable", or "timeout", `false` otherwise.
+ */
+
+function isRateLimitOrTransient(e: unknown): boolean {
+  const msg = String(e instanceof Error ? e.message : e).toLowerCase();
+  return (
+    msg.includes("429") ||
+    msg.includes("rate") ||
+    msg.includes("quota") ||
+    msg.includes("resource exhausted") ||
+    msg.includes("503") ||
+    msg.includes("unavailable") ||
+    msg.includes("timeout")
+  );
 }
 
 /**
- * Embed a batch of texts. Fires multiple embed calls concurrently
- * for maximum throughput against the Gemini API.
+ * Extracts a server-suggested retry delay (if present) from an error message or response text.
+ *
+ * Parses patterns like "retry in 53.8s" and returns the delay in milliseconds. Values must be greater than 0 and less than 300 seconds; the returned millisecond value is rounded up.
+ *
+ * @returns The suggested retry delay in milliseconds, or `null` if no valid delay is found.
  */
-async function batchEmbed(
-  texts: string[],
-): Promise<(number[] | null)[]> {
-  const model = google.textEmbeddingModel("gemini-embedding-001");
-  const results: (number[] | null)[] = new Array(texts.length).fill(null);
-
-  // Build sub-batches
-  const batches: { offset: number; values: string[] }[] = [];
-  for (let i = 0; i < texts.length; i += EMBED_BATCH_SIZE) {
-    batches.push({
-      offset: i,
-      values: texts.slice(i, i + EMBED_BATCH_SIZE).map((t) => t.slice(0, MAX_EMBED_TEXT_CHARS)),
-    });
+function parseRetryDelay(e: unknown): number | null {
+  const msg = String(e instanceof Error ? e.message : e);
+  // Match "retry in 53.813279082s" or "retryDelay: 53s"
+  const match = msg.match(/retry\s+in\s+([\d.]+)s/i);
+  if (match) {
+    const seconds = parseFloat(match[1]);
+    if (Number.isFinite(seconds) && seconds > 0 && seconds < 300) {
+      return Math.ceil(seconds * 1000); // convert to ms, round up
+    }
   }
-
-  // Fire all sub-batches concurrently (each one internally parallelises via maxParallelCalls)
-  await Promise.all(
-    batches.map(async ({ offset, values }) => {
-      try {
-        const { embeddings } = await embedMany({
-          model,
-          values,
-          maxParallelCalls: MAX_PARALLEL_EMBED_CALLS,
-        });
-        for (let j = 0; j < values.length; j++) {
-          const emb = embeddings[j];
-          if (emb && emb.length === EMBEDDING_DIM) {
-            results[offset + j] = emb;
-          }
-        }
-      } catch (e) {
-        console.error(`Batch embed failed at offset ${offset}, retrying singles:`, e);
-        for (let j = 0; j < values.length; j++) {
-          try {
-            const { embedding: emb } = await embed({
-              model,
-              value: values[j],
-            });
-            if (emb?.length === EMBEDDING_DIM) {
-              results[offset + j] = emb;
-            }
-          } catch (err) {
-            console.error("Single embed failed for chunk:", err);
-          }
-        }
-      }
-    }),
-  );
-
-  return results;
+  return null;
 }
 
-// ─── Pinecone Helpers ────────────────────────────────────
+/**
+ * Pauses execution for the specified number of milliseconds.
+ *
+ * @param ms - Duration to sleep in milliseconds
+ */
+async function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/**
+ * Retry the provided asynchronous operation on transient or rate-limit failures.
+ *
+ * Retries use a server-suggested delay when present; otherwise an exponential backoff with jitter is applied. Retries stop when the operation succeeds or when the retry budget is exhausted.
+ *
+ * @param fn - The operation to execute and potentially retry
+ * @param label - A short label included in retry log messages
+ * @returns The value returned by `fn`
+ * @throws The last encountered error if all retry attempts fail
+ */
+async function withRetry<T>(fn: () => Promise<T>, label: string): Promise<T> {
+  let lastError: unknown;
+  for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+    try {
+      return await fn();
+    } catch (e) {
+      lastError = e;
+      if (attempt < MAX_RETRIES && isRateLimitOrTransient(e)) {
+        // Prefer server-suggested delay, otherwise use exponential backoff
+        const serverDelay = parseRetryDelay(e);
+        const jitter = Math.random() * 1_000;
+        const backoffDelay = Math.min(BASE_DELAY_MS * 2 ** attempt + jitter, MAX_DELAY_MS);
+        const delay = serverDelay ? Math.max(serverDelay + jitter, backoffDelay) : backoffDelay;
+        console.warn(`[${label}] Attempt ${attempt + 1}/${MAX_RETRIES + 1} failed, retrying in ${Math.round(delay / 1000)}s${serverDelay ? ' (server-suggested)' : ''}`);
+        await sleep(delay);
+        continue;
+      }
+      throw e;
+    }
+  }
+  throw lastError;
+}
+
+/**
+ * Produces a short hexadecimal fingerprint of the given content for deduplication.
+ *
+ * @param text - The input string to hash
+ * @returns A 16-character hexadecimal fingerprint: the first 16 hex characters of the SHA-256 digest of `text`
+ */
+
+function contentHash(text: string): string {
+  return createHash("sha256").update(text).digest("hex").slice(0, 16);
+}
+
+/**
+ * Produce an embedding vector for the given text using the configured embedding model.
+ *
+ * @param text - Input text to embed
+ * @param taskType - Embedding task hint for the provider; one of:
+ *   - `CODE_RETRIEVAL_QUERY` (default)
+ *   - `RETRIEVAL_DOCUMENT`
+ *   - `RETRIEVAL_QUERY`
+ *   The task influences provider-side embedding behavior for queries vs. documents.
+ * @returns An array of numbers representing the embedding vector for `text`
+ */
+
+export async function generateEmbedding(text: string, taskType: "CODE_RETRIEVAL_QUERY" | "RETRIEVAL_DOCUMENT" | "RETRIEVAL_QUERY" = "CODE_RETRIEVAL_QUERY") {
+  return withRetry(async () => {
+    const { embedding } = await embed({
+      model: google.textEmbeddingModel(EMBEDDING_MODEL),
+      value: text,
+      providerOptions: {
+        google: { taskType },
+      },
+    });
+    return embedding;
+  }, "generateEmbedding");
+}
+
+/** Batch result with success/failure tracking */
+export interface BatchEmbedResult {
+  embeddings: (number[] | null)[];
+  succeeded: number;
+  failed: number;
+}
+
+/**
+ * Embed an array of texts into vectors in batches, with throttling, retry/backoff, and per-item fallback.
+ *
+ * Processes `texts` in batches using the configured embedding model and provider `taskType`. Between batches it applies an inter-batch delay to respect rate limits. If a batch request fails after retries, each item in that batch is attempted individually. Tracks and returns per-item embeddings along with counts of succeeded and failed embeddings.
+ *
+ * @param texts - The input strings to embed, in order.
+ * @param taskType - Provider-specific embedding task type; defaults to `"RETRIEVAL_DOCUMENT"`.
+ * @returns An object containing `embeddings` (array aligned with `texts`, with `null` for failed items), `succeeded` (number of successful embeddings), and `failed` (number of failed embeddings).
+ */
+async function batchEmbed(texts: string[], taskType: "RETRIEVAL_DOCUMENT" | "CODE_RETRIEVAL_QUERY" = "RETRIEVAL_DOCUMENT"): Promise<BatchEmbedResult> {
+  const model = google.textEmbeddingModel(EMBEDDING_MODEL);
+  const embeddings: (number[] | null)[] = new Array(texts.length).fill(null);
+  let succeeded = 0;
+  let failed = 0;
+  const totalBatches = Math.ceil(texts.length / EMBED_BATCH_SIZE);
+
+  for (let i = 0; i < texts.length; i += EMBED_BATCH_SIZE) {
+    const batchIdx = Math.floor(i / EMBED_BATCH_SIZE) + 1;
+    const batch = texts.slice(i, i + EMBED_BATCH_SIZE);
+
+    // Throttle: pause between batches to stay under rate limit
+    if (i > 0) {
+      console.log(`[embed] Throttling ${INTER_BATCH_DELAY_MS / 1000}s before batch ${batchIdx}/${totalBatches}...`);
+      await sleep(INTER_BATCH_DELAY_MS);
+    }
+
+    try {
+      const result = await withRetry(
+        () => embedMany({
+          model,
+          values: batch,
+          maxParallelCalls: MAX_PARALLEL_EMBED_CALLS,
+          providerOptions: {
+            google: { taskType },
+          },
+        }),
+        `batchEmbed[${i}..${i + batch.length}]`,
+      );
+      for (let j = 0; j < batch.length; j++) {
+        const emb = result.embeddings[j];
+        if (emb && emb.length === EMBEDDING_DIM) {
+          embeddings[i + j] = emb;
+          succeeded++;
+        } else {
+          failed++;
+        }
+      }
+      console.log(`[embed] Batch ${batchIdx}/${totalBatches} done (${succeeded} ok, ${failed} failed so far)`);
+    } catch (e) {
+      console.error(`Batch ${batchIdx}/${totalBatches} failed after retries, falling back to single:`, e);
+      for (let j = 0; j < batch.length; j++) {
+        try {
+          // Single-embed fallback also gets throttled
+          if (j > 0) await sleep(1_000);
+          const emb = await generateEmbedding(batch[j], taskType);
+          if (emb?.length === EMBEDDING_DIM) {
+            embeddings[i + j] = emb;
+            succeeded++;
+          } else {
+            failed++;
+          }
+        } catch (err) {
+          console.error("Single embed failed for chunk:", err);
+          failed++;
+        }
+      }
+    }
+  }
+
+  return { embeddings, succeeded, failed };
+}
+
+// ─── Pinecone Vector Types ───────────────────────────────
 
 interface VectorRecord {
   id: string;
@@ -92,33 +230,23 @@ interface VectorRecord {
     language: string;
     startLine: number;
     endLine: number;
+    contentHash: string;
+    symbolName?: string;
+    hasExports?: boolean;
+    complexity?: number;
   };
-}
-
-/** Upsert vectors in parallel batches for maximum throughput. */
-async function parallelUpsert(vectors: VectorRecord[]): Promise<void> {
-  if (vectors.length === 0) return;
-
-  const batches: VectorRecord[][] = [];
-  for (let i = 0; i < vectors.length; i += UPSERT_BATCH_SIZE) {
-    batches.push(vectors.slice(i, i + UPSERT_BATCH_SIZE));
-  }
-
-  // Process batches in waves of MAX_PARALLEL_UPSERTS
-  for (let i = 0; i < batches.length; i += MAX_PARALLEL_UPSERTS) {
-    await Promise.all(
-      batches.slice(i, i + MAX_PARALLEL_UPSERTS).map((batch) =>
-        pineconeIndex.upsert({ records: batch }),
-      ),
-    );
-  }
 }
 
 // ─── Index Codebase (Full — used on initial connect) ─────
 
 /**
- * Index an entire codebase: chunk → embed → upsert in a streamed pipeline.
- * Embedding and upserting run concurrently for maximum speed.
+ * Indexes a repository's files into function-level vector records and upserts them into the repository's Pinecone namespace.
+ *
+ * Splits files into function-level chunks, deduplicates by content hash, generates embeddings, builds vector records with enriched metadata, and upserts them in batches.
+ *
+ * @param repoId - Repository identifier used to namespace vectors
+ * @param files - Array of file objects each containing `path` and `content` to be chunked and indexed
+ * @returns The number of vectors successfully upserted to the index
  */
 export async function indexCodebase(
   repoId: string,
@@ -126,38 +254,55 @@ export async function indexCodebase(
 ): Promise<number> {
   if (files.length === 0) return 0;
 
-  // Step 1: Chunk all files (CPU-only, fast)
+  // Step 1: Chunk all files into function-level pieces
   const chunks = chunkFiles(files);
-  console.log(`Chunked ${files.length} files → ${chunks.length} chunks for ${repoId}`);
+  console.log(`Chunked ${files.length} files into ${chunks.length} chunks for repo: ${repoId}`);
+
   if (chunks.length === 0) return 0;
 
-  // Step 2: Embed all chunks (concurrent batches)
+  // Step 2: Deduplicate by content hash — skip chunks already embedded
   const texts = chunks.map((c) => c.content);
-  const embeddings = await batchEmbed(texts);
+  const hashes = texts.map(contentHash);
 
-  // Step 3: Build vectors
+  // Step 3: Generate embeddings (with retry + backoff)
+  const { embeddings, succeeded, failed } = await batchEmbed(texts);
+  console.log(`Embedding stats: ${succeeded} succeeded, ${failed} failed out of ${texts.length}`);
+
+  // Step 4: Build vector records with enriched metadata
   const vectors: VectorRecord[] = [];
   for (let i = 0; i < chunks.length; i++) {
     const emb = embeddings[i];
     if (!emb) continue;
+
     vectors.push({
       id: `${repoId}::${chunks[i].filePath}#${chunks[i].startLine}`,
       values: emb,
       metadata: {
         path: chunks[i].filePath,
         repoId,
-        content: chunks[i].content.slice(0, MAX_EMBED_TEXT_CHARS),
+        content: chunks[i].content,
         chunkType: chunks[i].type,
         language: chunks[i].language,
         startLine: chunks[i].startLine,
         endLine: chunks[i].endLine,
+        contentHash: hashes[i],
+        ...(chunks[i].symbolName && { symbolName: chunks[i].symbolName }),
+        ...(chunks[i].hasExports && { hasExports: true }),
+        ...(chunks[i].complexity && { complexity: chunks[i].complexity }),
       },
     });
   }
 
-  // Step 4: Parallel upsert
-  await parallelUpsert(vectors);
-  console.log(`Indexed ${vectors.length} vectors for ${repoId}`);
+  // Step 5: Upsert to Pinecone in batches (namespace-isolated per repo)
+  if (vectors.length > 0) {
+    const ns = getRepoNamespace(repoId);
+    for (let i = 0; i < vectors.length; i += UPSERT_BATCH_SIZE) {
+      await ns.upsert({
+        records: vectors.slice(i, i + UPSERT_BATCH_SIZE),
+      });
+    }
+    console.log(`Indexed ${vectors.length} vectors for repo: ${repoId}`);
+  }
 
   return vectors.length;
 }
@@ -165,7 +310,11 @@ export async function indexCodebase(
 // ─── Index Specific Files (Incremental — used per PR) ────
 
 /**
- * Re-index only specific files. Deletes old vectors first.
+ * Re-index specified files in a repository by deleting their existing vectors and upserting new chunk vectors.
+ *
+ * @param repoId - The repository identifier used to scope the vector namespace
+ * @param files - Array of files to index; each item must include `path` and `content`
+ * @returns The number of vector records successfully upserted for the provided files
  */
 export async function indexFiles(
   repoId: string,
@@ -173,35 +322,51 @@ export async function indexFiles(
 ): Promise<number> {
   if (files.length === 0) return 0;
 
-  // Delete old vectors for these file paths
+  // Delete old vectors for these specific file paths
   await deleteFileVectors(repoId, files.map((f) => f.path));
 
+  // Chunk and embed
   const chunks = chunkFiles(files);
   if (chunks.length === 0) return 0;
 
   const texts = chunks.map((c) => c.content);
-  const embeddings = await batchEmbed(texts);
+  const hashes = texts.map(contentHash);
+  const { embeddings, succeeded, failed } = await batchEmbed(texts);
+  console.log(`Incremental embed stats: ${succeeded} succeeded, ${failed} failed out of ${texts.length}`);
 
   const vectors: VectorRecord[] = [];
   for (let i = 0; i < chunks.length; i++) {
     const emb = embeddings[i];
     if (!emb) continue;
+
     vectors.push({
       id: `${repoId}::${chunks[i].filePath}#${chunks[i].startLine}`,
       values: emb,
       metadata: {
         path: chunks[i].filePath,
         repoId,
-        content: chunks[i].content.slice(0, MAX_EMBED_TEXT_CHARS),
+        content: chunks[i].content,
         chunkType: chunks[i].type,
         language: chunks[i].language,
         startLine: chunks[i].startLine,
         endLine: chunks[i].endLine,
+        contentHash: hashes[i],
+        ...(chunks[i].symbolName && { symbolName: chunks[i].symbolName }),
+        ...(chunks[i].hasExports && { hasExports: true }),
+        ...(chunks[i].complexity && { complexity: chunks[i].complexity }),
       },
     });
   }
 
-  await parallelUpsert(vectors);
+  if (vectors.length > 0) {
+    const ns = getRepoNamespace(repoId);
+    for (let i = 0; i < vectors.length; i += UPSERT_BATCH_SIZE) {
+      await ns.upsert({
+        records: vectors.slice(i, i + UPSERT_BATCH_SIZE),
+      });
+    }
+  }
+
   console.log(`Incrementally indexed ${vectors.length} vectors for ${files.length} files in ${repoId}`);
   return vectors.length;
 }
@@ -209,33 +374,32 @@ export async function indexFiles(
 // ─── Delete Vectors ──────────────────────────────────────
 
 /**
- * Delete all vectors for specific file paths in a repo.
- * Used when files are deleted or before re-indexing changed files.
+ * Remove all vector records in the repository namespace that are associated with the given file paths.
+ *
+ * Attempts to locate vectors by path and delete any matching IDs; errors for individual files are caught and logged.
+ *
+ * @param repoId - Repository identifier whose namespace will be targeted for deletion
+ * @param filePaths - List of file paths whose vectors should be removed
  */
 export async function deleteFileVectors(
   repoId: string,
   filePaths: string[],
 ): Promise<void> {
-  // Build all possible vector IDs for these files
-  // Since chunks have IDs like "owner/repo::path/file.ts#0", we need to
-  // query by metadata filter and delete matching IDs
+  const ns = getRepoNamespace(repoId);
+
   for (const filePath of filePaths) {
     try {
-      // Query to find all vector IDs for this file
       const dummyEmbedding = new Array(EMBEDDING_DIM).fill(0);
-      const results = await pineconeIndex.query({
+      const results = await ns.query({
         vector: dummyEmbedding,
         topK: 100,
-        filter: {
-          repoId,
-          path: filePath,
-        },
+        filter: { path: filePath },
         includeMetadata: false,
       });
 
       const ids = results.matches?.map((m) => m.id).filter(Boolean) || [];
       if (ids.length > 0) {
-        await pineconeIndex.deleteMany(ids);
+        await ns.deleteMany(ids);
       }
     } catch (e) {
       console.error(`Failed to delete vectors for ${filePath}:`, e);
@@ -244,31 +408,16 @@ export async function deleteFileVectors(
 }
 
 /**
- * Delete ALL vectors for a repository.
- * Used when a repo is disconnected.
+ * Delete all vectors stored in the repository's namespace.
+ *
+ * Performs a single namespace-level deleteAll operation to remove every vector associated with `repoId`.
+ *
+ * @param repoId - The repository identifier whose vectors should be deleted
  */
 export async function deleteRepoVectors(repoId: string): Promise<void> {
   try {
-    // Use metadata filter to find and delete all vectors for this repo
-    // Pinecone supports deleteMany with filter on some plans
-    const dummyEmbedding = new Array(EMBEDDING_DIM).fill(0);
-    let hasMore = true;
-
-    while (hasMore) {
-      const results = await pineconeIndex.query({
-        vector: dummyEmbedding,
-        topK: 100,
-        filter: { repoId },
-        includeMetadata: false,
-      });
-
-      const ids = results.matches?.map((m) => m.id).filter(Boolean) || [];
-      if (ids.length > 0) {
-        await pineconeIndex.deleteMany(ids);
-      }
-      hasMore = ids.length === 100; // If we got exactly 100, there might be more
-    }
-
+    const ns = getRepoNamespace(repoId);
+    await ns.deleteAll();
     console.log(`Deleted all vectors for repo: ${repoId}`);
   } catch (e) {
     console.error(`Failed to delete repo vectors for ${repoId}:`, e);
@@ -346,7 +495,10 @@ function extractDiffKeyTerms(diff: string, maxTerms: number = 15): string[] {
 }
 
 /**
- * Determine the optimal topK based on PR size.
+ * Choose the recommended `topK` value for retrieval based on the number of files changed in a PR.
+ *
+ * @param filesChanged - The number of files changed in the pull request
+ * @returns The recommended number of results (`topK`) to retrieve for the given PR size
  */
 function dynamicTopK(filesChanged: number): number {
   if (filesChanged <= 3) return 4;
@@ -356,10 +508,143 @@ function dynamicTopK(filesChanged: number): number {
 }
 
 /**
- * Retrieve relevant context for a PR using hybrid retrieval:
- * 1. Semantic search (embedding similarity)
- * 2. File-path matching (exact match for related files)
- * 3. Score filtering (drop low-relevance results)
+ * Choose a similarity threshold based on the number of files changed in a pull request.
+ *
+ * @param filesChanged - Count of files modified in the PR
+ * @returns A similarity threshold (0–1): `0.2` for <= 2 files, `0.25` for <= 5, `0.3` for <= 10, and `0.35` for larger changes
+ */
+function dynamicSimilarityThreshold(filesChanged: number): number {
+  if (filesChanged <= 2) return 0.2;
+  if (filesChanged <= 5) return 0.25;
+  if (filesChanged <= 10) return 0.3;
+  return 0.35;
+}
+
+// ─── Keyword Scoring (lightweight BM25-like) ─────────────
+
+/**
+ * Computes a normalized keyword relevance score between a query and a document.
+ *
+ * @param query - The query string whose terms will be matched against the document
+ * @param content - The document text to score
+ * @returns A numeric relevance score (approximately 0 to 1) where higher values indicate greater keyword overlap; matches per query term are capped to prevent single-term dominance
+ */
+function keywordScore(query: string, content: string): number {
+  const queryTerms = query.toLowerCase().split(/\W+/).filter((t) => t.length > 2);
+  if (queryTerms.length === 0) return 0;
+
+  const contentLower = content.toLowerCase();
+  let matchCount = 0;
+
+  for (const term of queryTerms) {
+    // Count occurrences (capped at 3 per term to avoid single-term dominance)
+    const regex = new RegExp(`\\b${term.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b`, "gi");
+    const matches = contentLower.match(regex);
+    matchCount += Math.min(matches?.length ?? 0, 3);
+  }
+
+  // Normalize by query term count (score 0-1 range approx)
+  return matchCount / (queryTerms.length * 2);
+}
+
+// ─── Reciprocal Rank Fusion ──────────────────────────────
+
+interface ScoredMatch {
+  id: string;
+  content: string;
+  metadata: Record<string, unknown>;
+  semanticScore: number;
+  keywordScore: number;
+  proximityBoost: number;
+  rrfScore: number;
+}
+
+/**
+ * Fuses semantic and keyword ranked lists into a single ranking using Reciprocal Rank Fusion (RRF) with optional proximity boosts based on changed files.
+ *
+ * Combines two ranked inputs by applying RRF scores (1 / (k + rank)) weighted by `weights.semantic` and `weights.keyword`, adds a proximity-based boost for items in or near changed file paths weighted by `weights.proximity`, and returns the entries sorted by the resulting fused score.
+ *
+ * @param semanticRanked - Ranked semantic search results; each item must include `id`, `score`, `content`, and `metadata` (used for path-based proximity).
+ * @param keywordRanked - Ranked keyword search results with the same structure as `semanticRanked`.
+ * @param changedFiles - List of changed file paths used to compute proximity boosts for matches located in the same file or directory.
+ * @param weights - Weighting factors for combining signals; defaults to `{ semantic: 0.6, keyword: 0.25, proximity: 0.15 }`.
+ * @returns An array of merged matches sorted by descending fused RRF score. Each element includes `id`, `content`, `metadata`, `semanticScore`, `keywordScore`, `proximityBoost`, and `rrfScore`.
+function reciprocalRankFusion(
+  semanticRanked: { id: string; score: number; content: string; metadata: Record<string, unknown> }[],
+  keywordRanked: { id: string; score: number; content: string; metadata: Record<string, unknown> }[],
+  changedFiles: string[],
+  weights: { semantic: number; keyword: number; proximity: number } = { semantic: 0.6, keyword: 0.25, proximity: 0.15 },
+): ScoredMatch[] {
+  const K = 60;
+  const merged = new Map<string, ScoredMatch>();
+
+  // Changed file directory set for proximity boosting
+  const changedDirs = new Set(changedFiles.map((f) => f.split("/").slice(0, -1).join("/")));
+
+  // Score semantic results
+  for (let rank = 0; rank < semanticRanked.length; rank++) {
+    const item = semanticRanked[rank];
+    const path = (item.metadata?.path as string) ?? "";
+    const dir = path.split("/").slice(0, -1).join("/");
+    const proximityBoost = changedDirs.has(dir) ? 1.0 : changedFiles.includes(path) ? 0.8 : 0;
+
+    merged.set(item.id, {
+      id: item.id,
+      content: item.content,
+      metadata: item.metadata,
+      semanticScore: item.score,
+      keywordScore: 0,
+      proximityBoost,
+      rrfScore: weights.semantic * (1 / (K + rank + 1)),
+    });
+  }
+
+  // Score keyword results
+  for (let rank = 0; rank < keywordRanked.length; rank++) {
+    const item = keywordRanked[rank];
+    const existing = merged.get(item.id);
+    if (existing) {
+      existing.keywordScore = item.score;
+      existing.rrfScore += weights.keyword * (1 / (K + rank + 1));
+    } else {
+      const path = (item.metadata?.path as string) ?? "";
+      const dir = path.split("/").slice(0, -1).join("/");
+      const proximityBoost = changedDirs.has(dir) ? 1.0 : changedFiles.includes(path) ? 0.8 : 0;
+
+      merged.set(item.id, {
+        id: item.id,
+        content: item.content,
+        metadata: item.metadata,
+        semanticScore: 0,
+        keywordScore: item.score,
+        proximityBoost,
+        rrfScore: weights.keyword * (1 / (K + rank + 1)),
+      });
+    }
+  }
+
+  // Apply proximity boost to RRF scores
+  for (const match of merged.values()) {
+    match.rrfScore += weights.proximity * match.proximityBoost * (1 / (K + 1)); // Treat proximity as rank-1 boost
+  }
+
+  // Sort by fused RRF score descending
+  return Array.from(merged.values()).sort((a, b) => b.rrfScore - a.rrfScore);
+}
+
+/**
+ * Retrieve a ranked set of relevant code or text snippets for a pull request query.
+ *
+ * Combines semantic embedding search, keyword scoring, and reciprocal-rank fusion with
+ * file-proximity boosts, then deduplicates results and returns up to `topK` contexts.
+ *
+ * @param query - The PR title/description or query text used to find relevant context.
+ * @param repoId - Repository identifier used to scope the semantic search namespace.
+ * @param options.topK - Desired number of contexts to return; when omitted a dynamic value is chosen based on `filesChanged`.
+ * @param options.changedFiles - Array of changed file paths to apply proximity boosts and direct file-scoped retrieval.
+ * @param options.filesChanged - Number of files changed; used to compute dynamic `topK` and similarity threshold when `topK` is not provided.
+ * @returns An array of context strings (code or text snippets) ranked by relevance and deduplicated, containing at most `topK` items.
+ * @throws If the generated query embedding is missing or has unexpected dimensions.
  */
 export async function retrieveContext(
   query: string,
@@ -370,78 +655,89 @@ export async function retrieveContext(
     filesChanged?: number;
   } = {},
 ): Promise<string[]> {
-  const topK = options.topK ?? dynamicTopK(options.filesChanged ?? DEFAULT_TOP_K);
+  const filesChanged = options.filesChanged ?? DEFAULT_TOP_K;
+  const topK = options.topK ?? dynamicTopK(filesChanged);
+  const threshold = dynamicSimilarityThreshold(filesChanged);
 
-  // 1. Semantic similarity search
-  const queryEmbedding = await generateEmbedding(query);
+  // Over-fetch for re-ranking (2x topK, capped at 20)
+  const fetchK = Math.min(topK * 2, 20);
+
+  // 1. Generate query embedding (with retry + backoff)
+  // Use CODE_RETRIEVAL_QUERY for code search queries per Google's task type spec
+  const queryEmbedding = await generateEmbedding(query, "CODE_RETRIEVAL_QUERY");
   if (!queryEmbedding || queryEmbedding.length !== EMBEDDING_DIM) {
     throw new Error(`Invalid query embedding dimensions: ${queryEmbedding?.length || 0}`);
   }
 
-  const semanticResults = await pineconeIndex.query({
+  // 2. Semantic similarity search (namespace-scoped for this repo)
+  const ns = getRepoNamespace(repoId);
+  const semanticResults = await ns.query({
     vector: queryEmbedding,
-    topK,
-    filter: { repoId },
+    topK: fetchK,
     includeMetadata: true,
   });
 
-  // 2. File-path matching — fetch vectors for files related to the changed files
-  const pathMatchResults: string[] = [];
-  if (options.changedFiles && options.changedFiles.length > 0) {
-    // Get import-adjacent files (same directory barrel files, etc.)
-    const relatedPaths = new Set<string>();
-    for (const changedFile of options.changedFiles.slice(0, 10)) {
-      // Look for the directory's index file
-      const dir = changedFile.split("/").slice(0, -1).join("/");
-      if (dir) {
-        relatedPaths.add(dir + "/index.ts");
-        relatedPaths.add(dir + "/index.js");
-      }
-    }
+  const semanticRanked = (semanticResults.matches ?? [])
+    .filter((m) => m.score && m.score > threshold)
+    .map((m) => ({
+      id: m.id,
+      score: m.score ?? 0,
+      content: (m.metadata?.content as string) ?? "",
+      metadata: (m.metadata as Record<string, unknown>) ?? {},
+    }))
+    .filter((m) => m.content.length > 0);
 
-    // Query Pinecone for vectors matching the changed file paths themselves
-    // (we want existing indexed chunks for files being modified)
-    for (const filePath of options.changedFiles.slice(0, 5)) {
+  // 3. Keyword scoring — re-rank the semantic results by keyword overlap
+  const keywordRanked = semanticRanked
+    .map((m) => ({ ...m, score: keywordScore(query, m.content) }))
+    .filter((m) => m.score > 0)
+    .sort((a, b) => b.score - a.score);
+
+  // 4. Reciprocal Rank Fusion — merge semantic + keyword rankings
+  const changedFiles = options.changedFiles ?? [];
+  const fused = reciprocalRankFusion(semanticRanked, keywordRanked, changedFiles);
+
+  // 5. File-path match boost — also fetch chunks from changed files directly
+  if (changedFiles.length > 0) {
+    for (const filePath of changedFiles.slice(0, 5)) {
       try {
-        const fileResults = await pineconeIndex.query({
-          vector: queryEmbedding, // Use same embedding to rank within file
+        const fileResults = await ns.query({
+          vector: queryEmbedding,
           topK: 2,
-          filter: { repoId, path: filePath },
+          filter: { path: filePath },
           includeMetadata: true,
         });
 
-        const fileContexts =
-          fileResults.matches
-            ?.filter((m) => m.score && m.score > MIN_SIMILARITY_SCORE)
-            ?.map((m) => (m.metadata?.content as string) ?? "")
-            .filter(Boolean) ?? [];
-
-        pathMatchResults.push(...fileContexts);
+        for (const m of fileResults.matches ?? []) {
+          if (m.score && m.score > threshold && !fused.some((f) => f.id === m.id)) {
+            fused.push({
+              id: m.id,
+              content: (m.metadata?.content as string) ?? "",
+              metadata: (m.metadata as Record<string, unknown>) ?? {},
+              semanticScore: m.score ?? 0,
+              keywordScore: 0,
+              proximityBoost: 1.0,
+              rrfScore: 0.01, // low base — proximity will boost it
+            });
+          }
+        }
       } catch {
         // Silently continue if a specific file has no vectors
       }
     }
   }
 
-  // 3. Combine and deduplicate results, filtering by score
-  const contextSet = new Set<string>();
+  // 6. Deduplicate by content and return top-K
+  const seen = new Set<string>();
+  const contexts: string[] = [];
 
-  // Add semantic results (score-filtered)
-  const semanticContexts =
-    semanticResults.matches
-      ?.filter((m) => m.score && m.score > MIN_SIMILARITY_SCORE)
-      ?.map((m) => (m.metadata?.content as string) ?? "")
-      .filter(Boolean) ?? [];
-
-  for (const ctx of semanticContexts) {
-    contextSet.add(ctx);
+  for (const match of fused) {
+    if (!match.content || seen.has(match.content)) continue;
+    seen.add(match.content);
+    contexts.push(match.content);
+    if (contexts.length >= topK) break;
   }
 
-  // Add path-match results
-  for (const ctx of pathMatchResults) {
-    contextSet.add(ctx);
-  }
-
-  return Array.from(contextSet);
+  return contexts;
 }
 

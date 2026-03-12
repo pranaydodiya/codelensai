@@ -1,29 +1,23 @@
 import { NextRequest, NextResponse } from "next/server";
-import { generateWithFallback, resolveModel } from "@/module/ai/lib/gemini";
-import { auth } from "@/lib/auth";
-import { headers } from "next/headers";
-import { rateLimit } from "@/lib/rate-limit";
+import { generateForTools, resolveModel } from "@/module/ai/lib/gemini";
 
 const MAX_SYSTEM = 500;
 const MAX_MSG = 1200;
 const MAX_TURNS = 3;
 
+/**
+ * Handle POST requests to generate an AI response from the provided messages using the Gemini tools API.
+ *
+ * Validates that an API key exists, requires a non-empty `messages` array, trims and normalizes recent messages
+ * (and an optional `systemPrompt`) to configured length limits, invokes the Gemini tooling helper, and returns the raw
+ * generated text.
+ *
+ * @returns An HTTP response: on success, a 200 plain-text response containing the AI-generated text; if `messages` is missing or empty, a 400 JSON response with `{ error: "Messages are required" }`; on server or API errors, a 500 JSON response with `{ error: <message> }`.
+ */
 export async function POST(req: NextRequest) {
   try {
-    // Auth check
-    const session = await auth.api.getSession({ headers: await headers() });
-    if (!session?.user?.id) {
-      return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-    }
-
-    // Rate limit: 30 requests per minute per user
-    const rl = rateLimit(`ai-playground:${session.user.id}`, 30, 60_000);
-    if (!rl.allowed) {
-      return NextResponse.json({ error: "Too many requests" }, { status: 429 });
-    }
-
-    if (!process.env.GEMINI_API_KEY?.trim() && !process.env.GEMINI_BACKUP_API_KEY?.trim()) {
-      return NextResponse.json({ error: "AI service unavailable" }, { status: 503 });
+    if (!process.env.GEMINI_AI_TOOLS_API_KEY?.trim() && !process.env.GEMINI_BACKUP_API_KEY?.trim()) {
+      return NextResponse.json({ error: "GEMINI_AI_TOOLS_API_KEY or GEMINI_BACKUP_API_KEY is required" }, { status: 500 });
     }
     const body = await req.json();
     const messages = body?.messages;
@@ -44,7 +38,7 @@ export async function POST(req: NextRequest) {
         ? [{ role: "system" as const, content: String(systemPrompt).slice(0, MAX_SYSTEM) }, ...trimmed]
         : trimmed;
 
-    const text = await generateWithFallback({
+    const text = await generateForTools({
       modelId: resolveModel(model),
       messages: all,
       maxOutputTokens: 2048,
@@ -56,7 +50,8 @@ export async function POST(req: NextRequest) {
       headers: { "Content-Type": "text/plain; charset=utf-8" },
     });
   } catch (error: unknown) {
-    console.error("[AI Playground]", error instanceof Error ? error.message : error);
-    return NextResponse.json({ error: "Failed to process request" }, { status: 500 });
+    const message = error instanceof Error ? error.message : "Failed";
+    console.error("[AI Playground]", message);
+    return NextResponse.json({ error: message }, { status: 500 });
   }
 }

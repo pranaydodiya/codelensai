@@ -1,10 +1,7 @@
 /**
- * Smart code chunker — uses AST parsing via @ast-grep/napi for accurate
- * function/class-level chunks across 20+ languages.
- * Falls back to regex then fixed-size chunking if AST is unavailable.
+ * Smart code chunker — splits files into function/class-level chunks
+ * for more precise RAG retrieval instead of embedding whole files.
  */
-
-import { Lang, parse, type SgNode } from "@ast-grep/napi";
 
 export interface CodeChunk {
   /** Unique chunk ID within a file: filePath#chunkIndex */
@@ -21,13 +18,17 @@ export interface CodeChunk {
   endLine: number;
   /** Language detected from extension */
   language: string;
+  /** Primary symbol name (function/class/interface) if detected */
+  symbolName?: string;
+  /** Whether this chunk contains exports */
+  hasExports?: boolean;
+  /** Simple complexity estimate (branch count) */
+  complexity?: number;
 }
 
 const MAX_CHUNK_CHARS = 6000;
 const MIN_CHUNK_LINES = 5;
-const OVERLAP_LINES = 3;
-const LARGE_NODE_LINES = 15;
-const GROUP_MAX_LINES = 60;
+const OVERLAP_LINES = 3; // Lines of overlap between adjacent chunks for context
 
 // ─── Language detection from file extension ─────────────
 const EXT_TO_LANG: Record<string, string> = {
@@ -35,20 +36,15 @@ const EXT_TO_LANG: Record<string, string> = {
   ".tsx": "typescript",
   ".js": "javascript",
   ".jsx": "javascript",
-  ".mjs": "javascript",
-  ".cjs": "javascript",
   ".py": "python",
   ".go": "go",
   ".rs": "rust",
   ".java": "java",
   ".kt": "kotlin",
-  ".kts": "kotlin",
   ".rb": "ruby",
   ".php": "php",
   ".cs": "csharp",
   ".cpp": "cpp",
-  ".cc": "cpp",
-  ".cxx": "cpp",
   ".c": "c",
   ".h": "c",
   ".hpp": "cpp",
@@ -74,9 +70,6 @@ const EXT_TO_LANG: Record<string, string> = {
   ".bash": "shell",
   ".ex": "elixir",
   ".exs": "elixir",
-  ".dart": "dart",
-  ".lua": "lua",
-  ".hs": "haskell",
 };
 
 function detectLanguage(filePath: string): string {
@@ -84,216 +77,10 @@ function detectLanguage(filePath: string): string {
   return EXT_TO_LANG[ext] || "text";
 }
 
-// ─── AST Language Mapping (file ext → ast-grep Lang) ─────
-// Built-in: TypeScript, JavaScript, Tsx, Html, Css
-const EXT_TO_AST_LANG: Record<string, Lang> = {
-  ".ts": Lang.TypeScript,
-  ".tsx": Lang.Tsx,
-  ".js": Lang.JavaScript,
-  ".jsx": Lang.JavaScript,
-  ".mjs": Lang.JavaScript,
-  ".cjs": Lang.JavaScript,
-  ".css": Lang.Css,
-  ".scss": Lang.Css,
-  ".html": Lang.Html,
-};
-
-function getAstLang(filePath: string): Lang | undefined {
-  const ext = filePath.match(/\.[^.]+$/)?.[0]?.toLowerCase() || "";
-  return EXT_TO_AST_LANG[ext];
-}
-
-// ─── Node Kind Classification ────────────────────────────
-// Container kinds: classes/impls that should be split into methods when large
-const CONTAINER_KINDS = new Set([
-  "class_declaration", "class_definition", "class",
-  "interface_declaration", "enum_declaration",
-  "impl_item", "trait_item", "trait_definition",
-  "type_declaration",
-  "module", "object_declaration",
-  "class_specifier", "struct_specifier",
-]);
-
-// Method-level kinds inside containers
-const METHOD_KINDS = new Set([
-  "method_definition", "function_declaration", "function_definition",
-  "method_declaration", "constructor_declaration", "constructor_definition",
-  "function_item", "method", "singleton_method",
-]);
-
-// Export wrappers that contain the actual declaration
-const EXPORT_KINDS = new Set([
-  "export_statement", "export_declaration", "decorated_definition",
-]);
-
-// Trivial nodes to skip
-const SKIP_KINDS = new Set([
-  "comment", "line_comment", "block_comment", "doc_comment", "",
-]);
-
-// ─── AST Helpers ─────────────────────────────────────────
-/** Unwrap export/decorator to get the effective declaration kind */
-function getEffectiveKind(node: SgNode): string {
-  const kind = String(node.kind());
-  if (EXPORT_KINDS.has(kind)) {
-    for (const child of node.children()) {
-      const ck = String(child.kind());
-      if (!SKIP_KINDS.has(ck) && ck !== "export" && ck !== "default" && ck !== "decorator") {
-        return ck;
-      }
-    }
-  }
-  return kind;
-}
-
-/** Split a large container (class/impl) into method-level chunks */
-function splitContainer(
-  node: SgNode,
-  filePath: string,
-  allLines: string[],
-  language: string,
-  chunks: CodeChunk[],
-) {
-  const range = node.range();
-  const methods: { start: number; end: number }[] = [];
-
-  function findMethods(n: SgNode) {
-    for (const child of n.children()) {
-      const ck = String(child.kind());
-      if (METHOD_KINDS.has(ck)) {
-        methods.push({ start: child.range().start.line, end: child.range().end.line });
-      } else if (EXPORT_KINDS.has(ck) || ck === "body" || ck === "class_body" || ck === "declaration_list" || ck === "block") {
-        findMethods(child);
-      }
-    }
-  }
-  findMethods(node);
-
-  if (methods.length === 0) {
-    const text = allLines.slice(range.start.line, range.end.line + 1).join("\n");
-    if (text.trim()) {
-      chunks.push({
-        id: `${filePath}#${chunks.length}`,
-        filePath,
-        content: `File: ${filePath} (lines ${range.start.line + 1}-${range.end.line + 1})\n\n${text.slice(0, MAX_CHUNK_CHARS)}`,
-        type: "class",
-        startLine: range.start.line,
-        endLine: range.end.line,
-        language,
-      });
-    }
-    return;
-  }
-
-  // Class header (before first method)
-  if (methods[0].start > range.start.line) {
-    const headerText = allLines.slice(range.start.line, methods[0].start).join("\n");
-    if (headerText.trim()) {
-      chunks.push({
-        id: `${filePath}#${chunks.length}`,
-        filePath,
-        content: `File: ${filePath} (lines ${range.start.line + 1}-${methods[0].start})\n\n${headerText.slice(0, MAX_CHUNK_CHARS)}`,
-        type: "block",
-        startLine: range.start.line,
-        endLine: methods[0].start - 1,
-        language,
-      });
-    }
-  }
-
-  for (const m of methods) {
-    const text = allLines.slice(m.start, m.end + 1).join("\n");
-    if (text.trim()) {
-      chunks.push({
-        id: `${filePath}#${chunks.length}`,
-        filePath,
-        content: `File: ${filePath} (lines ${m.start + 1}-${m.end + 1})\n\n${text.slice(0, MAX_CHUNK_CHARS)}`,
-        type: "function",
-        startLine: m.start,
-        endLine: m.end,
-        language,
-      });
-    }
-  }
-}
-
-// ─── AST-Based Chunking (Primary) ───────────────────────
-function astChunk(filePath: string, content: string, language: string): CodeChunk[] | null {
-  const astLang = getAstLang(filePath);
-  if (!astLang) return null;
-
-  try {
-    const root = parse(astLang, content).root();
-    const lines = content.split("\n");
-    const chunks: CodeChunk[] = [];
-    let smallNodes: { start: number; end: number }[] = [];
-    let smallTotal = 0;
-
-    function flush() {
-      if (smallNodes.length === 0) return;
-      const s = smallNodes[0].start;
-      const e = smallNodes[smallNodes.length - 1].end;
-      const text = lines.slice(s, e + 1).join("\n");
-      if (text.trim()) {
-        chunks.push({
-          id: `${filePath}#${chunks.length}`,
-          filePath,
-          content: `File: ${filePath} (lines ${s + 1}-${e + 1})\n\n${text.slice(0, MAX_CHUNK_CHARS)}`,
-          type: "block",
-          startLine: s,
-          endLine: e,
-          language,
-        });
-      }
-      smallNodes = [];
-      smallTotal = 0;
-    }
-
-    for (const child of root.children()) {
-      if (SKIP_KINDS.has(String(child.kind()))) continue;
-
-      const range = child.range();
-      const s = range.start.line;
-      const e = range.end.line;
-      const nodeLines = e - s + 1;
-      const effectiveKind = getEffectiveKind(child);
-
-      if (nodeLines <= LARGE_NODE_LINES) {
-        // Small node — group with neighbors
-        if (smallTotal + nodeLines > GROUP_MAX_LINES) flush();
-        smallNodes.push({ start: s, end: e });
-        smallTotal += nodeLines;
-      } else {
-        flush();
-        // Large container (class/impl > 60 lines) — split into methods
-        if (CONTAINER_KINDS.has(effectiveKind) && nodeLines > 60) {
-          splitContainer(child, filePath, lines, language, chunks);
-        } else {
-          const text = lines.slice(s, e + 1).join("\n");
-          if (text.trim()) {
-            chunks.push({
-              id: `${filePath}#${chunks.length}`,
-              filePath,
-              content: `File: ${filePath} (lines ${s + 1}-${e + 1})\n\n${text.slice(0, MAX_CHUNK_CHARS)}`,
-              type: CONTAINER_KINDS.has(effectiveKind) ? "class" : "function",
-              startLine: s,
-              endLine: e,
-              language,
-            });
-          }
-        }
-      }
-    }
-
-    flush();
-    return chunks.length > 0 ? chunks : null;
-  } catch (err) {
-    console.warn(`AST parse failed for ${filePath}, falling back to regex:`, (err as Error).message);
-    return null;
-  }
-}
-
-// ─── Regex Fallback (for languages without AST support) ──
+/**
+ * Regex patterns to detect function/class boundaries per language family.
+ * These match the START of a top-level block.
+ */
 const BLOCK_PATTERNS: Record<string, RegExp> = {
   typescript:
     /^(?:export\s+)?(?:default\s+)?(?:async\s+)?(?:function\s+\w+|(?:const|let|var)\s+\w+\s*=\s*(?:async\s+)?(?:\([^)]*\)|[^=])\s*=>|class\s+\w+|interface\s+\w+|type\s+\w+|enum\s+\w+)/,
@@ -319,33 +106,92 @@ const BLOCK_PATTERNS: Record<string, RegExp> = {
     /^(?:(?:static\s+)?(?:inline\s+)?(?:\w+\s+)+\w+\s*\([^)]*\)\s*\{)/,
 };
 
+/**
+ * Find top-level block boundaries in source code.
+ * Returns line indices where new blocks start.
+ */
 function findBlockBoundaries(lines: string[], language: string): number[] {
   const pattern = BLOCK_PATTERNS[language];
   if (!pattern) return [];
 
   const boundaries: number[] = [];
+
   for (let i = 0; i < lines.length; i++) {
     const trimmed = lines[i].trimStart();
-    if (!trimmed || trimmed.startsWith("//") || trimmed.startsWith("#") || trimmed.startsWith("*")) continue;
+    // Skip empty lines, comments, and deeply indented code
+    if (!trimmed || trimmed.startsWith("//") || trimmed.startsWith("#") || trimmed.startsWith("*")) {
+      continue;
+    }
+
+    // Check indentation — only match top-level (0-1 levels of indent)
     const indent = lines[i].length - lines[i].trimStart().length;
-    if (indent > 4) continue;
-    if (pattern.test(trimmed)) boundaries.push(i);
+    if (indent > 4) continue; // Skip nested code
+
+    if (pattern.test(trimmed)) {
+      boundaries.push(i);
+    }
   }
+
   return boundaries;
 }
 
-function regexChunk(filePath: string, content: string, language: string): CodeChunk[] | null {
-  if (!BLOCK_PATTERNS[language]) return null;
+/**
+ * Split a single file into smart chunks.
+ * For code files: splits by function/class boundaries.
+ * For non-code or small files: returns the whole file as one chunk.
+ */
+export function chunkFile(
+  filePath: string,
+  content: string,
+): CodeChunk[] {
+  const language = detectLanguage(filePath);
   const lines = content.split("\n");
+
+  // Small files — return as single chunk
+  if (lines.length <= 60 || content.length <= 2000) {
+    return [
+      {
+        id: `${filePath}#0`,
+        filePath,
+        content: `File: ${filePath}\n\n${content.slice(0, MAX_CHUNK_CHARS)}`,
+        type: "file",
+        startLine: 0,
+        endLine: lines.length - 1,
+        language,
+      },
+    ];
+  }
+
+  // Non-code files (markdown, config) — return as single chunk (truncated)
+  if (!BLOCK_PATTERNS[language]) {
+    return [
+      {
+        id: `${filePath}#0`,
+        filePath,
+        content: `File: ${filePath}\n\n${content.slice(0, MAX_CHUNK_CHARS)}`,
+        type: "file",
+        startLine: 0,
+        endLine: lines.length - 1,
+        language,
+      },
+    ];
+  }
+
+  // Find function/class boundaries
   const boundaries = findBlockBoundaries(lines, language);
-  if (boundaries.length <= 1) return null;
+
+  // If no meaningful boundaries found, fall back to fixed-size chunking
+  if (boundaries.length <= 1) {
+    return fixedSizeChunk(filePath, lines, language);
+  }
 
   const chunks: CodeChunk[] = [];
 
-  // File header (imports, setup)
+  // Add file header (imports, top-level constants) if first boundary isn't at line 0
   if (boundaries[0] > MIN_CHUNK_LINES) {
-    const headerContent = lines.slice(0, boundaries[0]).join("\n");
-    if (headerContent.trim()) {
+    const headerLines = lines.slice(0, boundaries[0]);
+    const headerContent = headerLines.join("\n");
+    if (headerContent.trim().length > 0) {
       chunks.push({
         id: `${filePath}#0`,
         filePath,
@@ -358,12 +204,22 @@ function regexChunk(filePath: string, content: string, language: string): CodeCh
     }
   }
 
+  // Create chunks between boundaries
   for (let i = 0; i < boundaries.length; i++) {
     const start = Math.max(0, boundaries[i] - OVERLAP_LINES);
-    const end = i < boundaries.length - 1 ? boundaries[i + 1] - 1 : lines.length - 1;
+    const end =
+      i < boundaries.length - 1
+        ? boundaries[i + 1] - 1
+        : lines.length - 1;
+
+    // Skip tiny chunks
     if (end - start < MIN_CHUNK_LINES) continue;
-    const chunkContent = lines.slice(start, end + 1).join("\n");
-    if (!chunkContent.trim()) continue;
+
+    const chunkLines = lines.slice(start, end + 1);
+    const chunkContent = chunkLines.join("\n");
+
+    // Skip empty chunks
+    if (chunkContent.trim().length === 0) continue;
 
     chunks.push({
       id: `${filePath}#${chunks.length}`,
@@ -376,10 +232,27 @@ function regexChunk(filePath: string, content: string, language: string): CodeCh
     });
   }
 
-  return chunks.length > 0 ? chunks : null;
+  // If chunking produced nothing useful, fall back to whole file
+  if (chunks.length === 0) {
+    return [
+      {
+        id: `${filePath}#0`,
+        filePath,
+        content: `File: ${filePath}\n\n${content.slice(0, MAX_CHUNK_CHARS)}`,
+        type: "file",
+        startLine: 0,
+        endLine: lines.length - 1,
+        language,
+      },
+    ];
+  }
+
+  return chunks;
 }
 
-// ─── Fixed-Size Fallback ─────────────────────────────────
+/**
+ * Fixed-size chunking fallback — splits by line count.
+ */
 function fixedSizeChunk(
   filePath: string,
   lines: string[],
@@ -391,8 +264,10 @@ function fixedSizeChunk(
 
   for (let i = 0; i < lines.length; i += step) {
     const end = Math.min(i + chunkSize, lines.length);
-    const chunkContent = lines.slice(i, end).join("\n");
-    if (!chunkContent.trim()) continue;
+    const chunkLines = lines.slice(i, end);
+    const chunkContent = chunkLines.join("\n");
+
+    if (chunkContent.trim().length === 0) continue;
 
     chunks.push({
       id: `${filePath}#${chunks.length}`,
@@ -410,60 +285,10 @@ function fixedSizeChunk(
   return chunks;
 }
 
-// ─── Main Entry Points ──────────────────────────────────
-
 /**
- * Split a single file into smart chunks.
- * Strategy: AST parsing → regex fallback → fixed-size fallback.
- */
-export function chunkFile(
-  filePath: string,
-  content: string,
-): CodeChunk[] {
-  const language = detectLanguage(filePath);
-  const lines = content.split("\n");
-
-  // Small files — single chunk
-  if (lines.length <= 60 || content.length <= 2000) {
-    return [{
-      id: `${filePath}#0`,
-      filePath,
-      content: `File: ${filePath}\n\n${content.slice(0, MAX_CHUNK_CHARS)}`,
-      type: "file",
-      startLine: 0,
-      endLine: lines.length - 1,
-      language,
-    }];
-  }
-
-  // Non-code files without AST or regex support — single chunk
-  if (!BLOCK_PATTERNS[language] && !getAstLang(filePath)) {
-    return [{
-      id: `${filePath}#0`,
-      filePath,
-      content: `File: ${filePath}\n\n${content.slice(0, MAX_CHUNK_CHARS)}`,
-      type: "file",
-      startLine: 0,
-      endLine: lines.length - 1,
-      language,
-    }];
-  }
-
-  // 1. Try AST-based chunking (most accurate)
-  const astResult = astChunk(filePath, content, language);
-  if (astResult) return astResult;
-
-  // 2. Try regex-based chunking
-  const regexResult = regexChunk(filePath, content, language);
-  if (regexResult) return regexResult;
-
-  // 3. Fixed-size fallback
-  return fixedSizeChunk(filePath, lines, language);
-}
-
-/**
- * Chunk multiple files at once.
- * Returns all chunks flattened, ready for embedding.
+ * Split multiple files into code chunks and attach metadata to each chunk.
+ *
+ * @returns An array of CodeChunk objects representing all chunks from the input files; each chunk is enriched with `symbolName`, `hasExports`, and `complexity`.
  */
 export function chunkFiles(
   files: { path: string; content: string }[],
@@ -472,8 +297,79 @@ export function chunkFiles(
 
   for (const file of files) {
     const fileChunks = chunkFile(file.path, file.content);
-    allChunks.push(...fileChunks);
+    for (const chunk of fileChunks) {
+      allChunks.push(enrichChunk(chunk));
+    }
   }
 
   return allChunks;
+}
+
+// ─── Metadata Enrichment Helpers ─────────────────────────
+
+/**
+ * Determine the primary symbol name declared in the first meaningful line of a code block.
+ *
+ * @param content - The source code text to inspect.
+ * @returns The declared symbol name (for example a function, class, variable binding, type, or enum) if found, `undefined` otherwise.
+ */
+function extractSymbolName(content: string): string | undefined {
+  const lines = content.split("\n");
+  for (const line of lines) {
+    const trimmed = line.trim();
+    // function foo / async function foo
+    const fnMatch = trimmed.match(/(?:async\s+)?function\s+(\w+)/);
+    if (fnMatch) return fnMatch[1];
+    // const foo = / let foo = (arrow fns)
+    const arrowMatch = trimmed.match(/(?:export\s+)?(?:const|let|var)\s+(\w+)\s*=/);
+    if (arrowMatch && (trimmed.includes("=>") || trimmed.includes("function"))) return arrowMatch[1];
+    // class Foo / interface Foo / type Foo / enum Foo
+    const classMatch = trimmed.match(/(?:export\s+)?(?:class|interface|type|enum|struct|trait)\s+(\w+)/);
+    if (classMatch) return classMatch[1];
+    // def foo (Python) / func foo (Go) / fn foo (Rust)
+    const otherMatch = trimmed.match(/(?:pub\s+)?(?:async\s+)?(?:def|func|fn)\s+(\w+)/);
+    if (otherMatch) return otherMatch[1];
+  }
+  return undefined;
+}
+
+/**
+ * Detects whether the provided source text contains an `export` statement.
+ *
+ * @param content - Source text to inspect for export declarations.
+ * @returns `true` if an `export` keyword appears at the start of the text or at the start of a line; `false` otherwise.
+ */
+function hasExportStatements(content: string): boolean {
+  return /(?:^|\n)\s*export\s+/.test(content);
+}
+
+/**
+ * Estimate a code chunk's cyclomatic complexity using a lightweight branch-count heuristic.
+ *
+ * Counts occurrences of common branching constructs and returns that count plus a base of 1.
+ *
+ * @param content - Source code or text to analyze for branching constructs
+ * @returns The estimated cyclomatic complexity (number of branch points plus 1)
+ */
+function estimateComplexity(content: string): number {
+  const branchPatterns = /\b(?:if|else if|for|while|switch|catch|case)\b|\?\.|&&|\|\||\?\s*:/g;
+  const matches = content.match(branchPatterns);
+  return (matches?.length ?? 0) + 1; // base complexity of 1
+}
+
+/**
+ * Populate a CodeChunk's metadata fields (symbolName, hasExports, complexity).
+ *
+ * Strips a leading file header line (e.g., the "File: ..." prefix) before analyzing the chunk content
+ * and assigns `symbolName`, `hasExports`, and `complexity` on the provided `chunk` object.
+ *
+ * @param chunk - The CodeChunk to enrich
+ * @returns The same `chunk` instance with `symbolName`, `hasExports`, and `complexity` populated
+ */
+function enrichChunk(chunk: CodeChunk): CodeChunk {
+  const raw = chunk.content.split("\n\n").slice(1).join("\n\n"); // strip "File: ..." prefix line
+  chunk.symbolName = extractSymbolName(raw);
+  chunk.hasExports = hasExportStatements(raw);
+  chunk.complexity = estimateComplexity(raw);
+  return chunk;
 }
