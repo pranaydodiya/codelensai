@@ -1,0 +1,23 @@
+# Core framework
+fastapi==0.115.6
+uvicorn[standard]==0.32.1
+
+# LangChain ecosystem
+langchain==0.3.25
+langchain-community==0.3.25
+langchain-ollama==0.2.3
+langchain-google-genai==2.1.4
+langchain-pinecone==0.2.0
+
+# Pinecone client (must match TS side — v3 for langchain-pinecone 0.2.x)
+pinecone-client==5.0.1
+
+# Pydantic (FastAPI + validation)
+pydantic==2.10.6
+pydantic-settings==2.7.0
+
+# HTTP client (async, for health checks)
+httpx==0.28.1
+
+# Fast JSON
+orjson==3.10.14

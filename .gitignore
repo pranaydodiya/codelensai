@@ -57,3 +57,10 @@ coderabbit_transcript.txt
 implementationplan.md
 
 /diff/
+
+# python sidecar
+/python-sidecar/.venv/
+/python-sidecar/__pycache__/
+/python-sidecar/.pytest_cache/
+/python-sidecar/.mypy_cache/
+*.py[cod]
