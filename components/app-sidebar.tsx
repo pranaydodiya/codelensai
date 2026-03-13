@@ -15,6 +15,7 @@ import {
   BarChart3,
   Users,
   CodeXml,
+  MessageSquareDot,
 } from "lucide-react";
 
 import { useEffect, useState } from "react";
@@ -95,6 +96,12 @@ const navigationItems = [
     title: "Live Editor",
     url: "/dashboard/editor",
     icon: CodeXml,
+    group: "ai",
+  },
+  {
+    title: "AI Chat",
+    url: "/dashboard/ai-chat",
+    icon: MessageSquareDot,
     group: "ai",
   },
   {
