@@ -1,0 +1,30 @@
+services:
+  # Python AI Sidecar — FastAPI RAG service
+  - type: web
+    name: codelensai-sidecar
+    runtime: python
+    region: oregon
+    plan: free
+    rootDir: python-sidecar
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn main:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /chat/health
+    envVars:
+      - key: PYTHON_AI_API_KEY
+        sync: false
+      - key: PINECONE_DB_API_KEY
+        sync: false
+      - key: GOOGLE_API_KEY
+        sync: false
+      - key: PINECONE_INDEX_NAME
+        value: codelens
+      - key: LLM_PROVIDER
+        value: gemini
+      - key: GEMINI_MODEL
+        value: gemini-2.5-flash
+      - key: OLLAMA_ENABLED
+        value: "false"
+      - key: CORS_ORIGINS
+        sync: false  # Set to your Vercel domain, e.g. https://codelensai.vercel.app
+      - key: PYTHON_VERSION
+        value: "3.11.11"

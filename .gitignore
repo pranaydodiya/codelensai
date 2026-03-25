@@ -30,8 +30,12 @@ yarn-debug.log*
 yarn-error.log*
 .pnpm-debug.log*
 
-# env files (can opt-in for committing if needed)
-.env*
+# env files (keep .env.example for reference)
+.env
+.env.local
+.env.production
+.env.*.local
+!.env.example
 
 # vercel
 .vercel
@@ -45,6 +49,10 @@ next-env.d.ts
 # IDE and skill files
 .cursor/
 .agents/
+.claude/
+
+# Ground truth / personal reference files
+codelensai_ground_truth.*
 
 # Transcript files
 coderabbit_transcript.txt
@@ -61,7 +69,9 @@ implementationplan.md
 
 # python sidecar
 /python-sidecar/.venv/
+/python-sidecar/venv/
 /python-sidecar/__pycache__/
 /python-sidecar/.pytest_cache/
 /python-sidecar/.mypy_cache/
+/python-sidecar/test_*.py
 *.py[cod]

@@ -148,12 +148,6 @@ function ChatBubble({ msg }: { msg: Message }) {
             <div className="prose prose-sm dark:prose-invert max-w-none">
               <ReactMarkdown>{msg.content}</ReactMarkdown>
             </div>
-            {msg.sources && <SourceList sources={msg.sources} />}
-            {msg.modelUsed && (
-              <p className="mt-2 text-[10px] text-muted-foreground/60">
-                via {msg.modelUsed}
-              </p>
-            )}
           </>
         )}
       </div>

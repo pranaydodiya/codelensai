@@ -13,6 +13,13 @@ import { prioritizeFiles } from "@/module/ai/lib/file-prioritizer";
  * Full codebase indexing — triggered when a repository is first connected.
  * Uses the Git Trees API (single API call) instead of recursive file fetching,
  * smart file prioritization, and function-level chunking via the RAG pipeline.
+ *
+ * ⚡ Enhanced with:
+ *  - Higher blob fetch concurrency (25 parallel)
+ *  - Embedding cache (skip re-embedding unchanged content)
+ *  - Parallel Pinecone upserts
+ *  - Adaptive embedding throttling
+ *  - Detailed timing instrumentation
  */
 export const indexRepo = inngest.createFunction(
   { id: "index-repo", retries: 2 },
@@ -20,6 +27,7 @@ export const indexRepo = inngest.createFunction(
   async ({ event, step }) => {
     const { owner, repo, userId } = event.data;
     const repoId = `${owner}/${repo}`;
+    const startTimeTotal = Date.now();
 
     // Step 1: Init indexing state
     const { token, repositoryId } = await step.run("init-indexing", async () => {
@@ -55,7 +63,7 @@ export const indexRepo = inngest.createFunction(
       };
     });
 
-    // Step 2: Fetch repo tree + HEAD SHA (single API call each)
+    // Step 2: Fetch repo tree + HEAD SHA (single API call each, parallel)
     const treeData = await step.run("fetch-tree", async () => {
       const [tree, headSHA] = await Promise.all([
         getRepoTree(token, owner, repo),
@@ -73,24 +81,29 @@ export const indexRepo = inngest.createFunction(
       return prioritized.map((p) => ({ path: p.path, sha: shaMap.get(p.path) || "" }));
     });
 
-    // Step 4: Batch fetch file contents via blob API (parallel, rate-limited)
+    // Step 4: Batch fetch file contents via blob API (parallel, higher concurrency)
     const files = await step.run("fetch-contents", async () => {
-      return await batchGetFileContents(token, owner, repo, filesToIndex);
+      const fetchStart = Date.now();
+      // ⚡ Higher concurrency: 25 parallel blob fetches (up from 10)
+      const result = await batchGetFileContents(token, owner, repo, filesToIndex, 25);
+      console.log(`[index] Fetched ${result.length} file contents in ${Date.now() - fetchStart}ms`);
+      return result;
     });
 
-    // Step 5: Delete old vectors (separate step for retry isolation)
-    await step.run("delete-old-vectors", async () => {
-      await deleteRepoVectors(repoId);
-    });
-
-    // Step 6: Index fresh with function-level chunks + concurrent embeddings
+    // Step 5: Clear old vectors and index fresh with function-level chunks
     const vectorCount = await step.run("index-codebase", async () => {
-      return await indexCodebase(repoId, files);
+      const embedStart = Date.now();
+      await deleteRepoVectors(repoId);
+      const count = await indexCodebase(repoId, files);
+      console.log(`[index] Indexed ${count} vectors in ${Date.now() - embedStart}ms`);
+      return count;
     });
 
     // Step 7: Update indexing state with success
     await step.run("finalize-indexing", async () => {
       if (!repositoryId) return;
+
+      const totalTimeMs = Date.now() - startTimeTotal;
 
       await prisma.indexingState.upsert({
         where: { repositoryId },
@@ -111,6 +124,8 @@ export const indexRepo = inngest.createFunction(
           errorMessage: null,
         },
       });
+
+      console.log(`[index] ✅ Completed indexing ${repoId}: ${files.length} files, ${vectorCount} vectors, ${totalTimeMs}ms total`);
     });
 
     return {
@@ -119,6 +134,7 @@ export const indexRepo = inngest.createFunction(
       totalChunks: vectorCount,
       treeSize: treeData.treeFiles.length,
       prioritizedFiles: filesToIndex.length,
+      totalTimeMs: Date.now() - startTimeTotal,
     };
   },
 );

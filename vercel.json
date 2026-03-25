@@ -1,13 +1,18 @@
 {
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "framework": "nextjs",
+  "buildCommand": "npx prisma generate && next build",
+  "installCommand": "npm install",
   "functions": {
     "app/api/inngest/route.ts": {
       "maxDuration": 300
     },
-    "app/api/webhooks/github/route.ts": {
-      "maxDuration": 10
-    },
     "app/api/ai/**/*.ts": {
       "maxDuration": 60
+    },
+    "app/api/webhooks/**/*.ts": {
+      "maxDuration": 60
     }
-  }
+  },
+  "crons": []
 }
