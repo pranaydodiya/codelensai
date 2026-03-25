@@ -33,6 +33,14 @@ export async function submitFeedback(
   if (!review) throw new Error("Review not found");
 
   // Upsert: one reaction per user per section per review
+  const sanitizeComment = (raw: string) =>
+    raw
+      .replace(/[<>{}[\]]/g, "")         // Strip HTML/template characters
+      .replace(/```/g, "")               // Strip code fences that could break prompt formatting
+      .replace(/\r?\n{3,}/g, "\n\n")     // Collapse excessive newlines
+      .trim()
+      .slice(0, 500);
+
   await prisma.reviewFeedback.upsert({
     where: {
       reviewId_userId_section: {
@@ -46,16 +54,11 @@ export async function submitFeedback(
       userId: session.user.id,
       section,
       reaction,
-      // Sanitize comment: strip any potential prompt-injection characters
-      comment: comment
-        ? comment.replace(/[<>{}]/g, "").trim().slice(0, 500)
-        : null,
+      comment: comment ? sanitizeComment(comment) : null,
     },
     update: {
       reaction,
-      comment: comment
-        ? comment.replace(/[<>{}]/g, "").trim().slice(0, 500)
-        : null,
+      comment: comment ? sanitizeComment(comment) : null,
     },
   });
 

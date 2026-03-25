@@ -1,5 +1,6 @@
 "use server";
 import prisma from "@/lib/db";
+import { decrypt } from "@/lib/encryption";
 import { inngest } from "@/inngest/client";
 import { getPullRequestDiff } from "@/module/github/lib/github";
 import { canCreateReview , incrementReviewCount} from "@/module/payment/lib/subscription";
@@ -44,7 +45,7 @@ export async function reviewPullRequest(
             throw new Error("GitHub account not found")
         }
 
-        const token = githubAccount.accessToken
+        const token = decrypt(githubAccount.accessToken)
 
         const {title} = await getPullRequestDiff(token, owner, repo, prNumber)
 

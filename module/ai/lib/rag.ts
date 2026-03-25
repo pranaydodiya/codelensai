@@ -12,6 +12,8 @@ const MAX_PARALLEL_EMBED_CALLS = 3;    // 3 parallel × 20 batch = ~60 embedding
 const INITIAL_BATCH_DELAY_MS = 500;    // Start fast, only slow down on rate limits
 const MAX_BATCH_DELAY_MS = 8_000;      // Cap at 8s even under heavy throttling
 const UPSERT_BATCH_SIZE = 100;
+const MAX_PARALLEL_UPSERTS = 5;      // parallel Pinecone upserts
+const MAX_EMBED_TEXT_CHARS = 4000;    // truncate embed input for speed; keeps meaning
 const MIN_SIMILARITY_SCORE = 0.3;
 const DEFAULT_TOP_K = 5;
 
@@ -201,13 +203,13 @@ async function batchEmbed(texts: string[], taskType: "RETRIEVAL_DOCUMENT" | "COD
           failed++;
         }
       }
-    }
-  }
+    }),
+  );
 
   return { embeddings, succeeded, failed };
 }
 
-// ─── Pinecone Vector Types ───────────────────────────────
+// ─── Pinecone Helpers ────────────────────────────────────
 
 interface VectorRecord {
   id: string;
@@ -287,8 +289,7 @@ export async function indexCodebase(
 
   // Step 1: Chunk all files into function-level pieces
   const chunks = chunkFiles(files);
-  console.log(`Chunked ${files.length} files into ${chunks.length} chunks for repo: ${repoId}`);
-
+  console.log(`Chunked ${files.length} files → ${chunks.length} chunks for ${repoId}`);
   if (chunks.length === 0) return 0;
 
   // Step 2: Compute content hashes
@@ -343,7 +344,7 @@ export async function indexCodebase(
       metadata: {
         path: chunks[i].filePath,
         repoId,
-        content: chunks[i].content,
+        content: chunks[i].content.slice(0, MAX_EMBED_TEXT_CHARS),
         chunkType: chunks[i].type,
         language: chunks[i].language,
         startLine: chunks[i].startLine,
@@ -420,10 +421,9 @@ export async function indexFiles(
 ): Promise<number> {
   if (files.length === 0) return 0;
 
-  // Delete old vectors for these specific file paths
+  // Delete old vectors for these file paths
   await deleteFileVectors(repoId, files.map((f) => f.path));
 
-  // Chunk and embed
   const chunks = chunkFiles(files);
   if (chunks.length === 0) return 0;
 
@@ -445,7 +445,7 @@ export async function indexFiles(
       metadata: {
         path: chunks[i].filePath,
         repoId,
-        content: chunks[i].content,
+        content: chunks[i].content.slice(0, MAX_EMBED_TEXT_CHARS),
         chunkType: chunks[i].type,
         language: chunks[i].language,
         startLine: chunks[i].startLine,
