@@ -1,5 +1,6 @@
 import { inngest } from "../client";
 import prisma from "@/lib/db";
+import { decrypt } from "@/lib/encryption";
 import {
   getRepoTree,
   batchGetFileContents,
@@ -57,7 +58,7 @@ export const indexRepo = inngest.createFunction(
       }
 
       return {
-        token: account.accessToken,
+        token: decrypt(account.accessToken),
         repositoryId: repository?.id ?? null,
       };
     });
@@ -98,7 +99,7 @@ export const indexRepo = inngest.createFunction(
       return count;
     });
 
-    // Step 6: Update indexing state with success
+    // Step 7: Update indexing state with success
     await step.run("finalize-indexing", async () => {
       if (!repositoryId) return;
 

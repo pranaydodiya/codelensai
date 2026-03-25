@@ -56,6 +56,7 @@ codelensai_ground_truth.*
 
 # Transcript files
 coderabbit_transcript.txt
+implementationplan.md
 
 # VS Code Local History extension
 .history/

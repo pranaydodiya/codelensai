@@ -166,22 +166,38 @@ export const SchemaDisplayPath = ({
 }: SchemaDisplayPathProps) => {
   const { path } = useContext(SchemaDisplayContext);
 
-  // Highlight path parameters
-  const highlightedPath = path.replaceAll(
-    /\{([^}]+)\}/g,
-    '<span class="text-blue-600 dark:text-blue-400">{$1}</span>',
-  );
+  // Highlight path parameters using React elements (safe from XSS)
+  const pathSegments = useMemo(() => {
+    const parts: Array<{ text: string; isParam: boolean }> = [];
+    let lastIndex = 0;
+    const regex = /\{([^}]+)\}/g;
+    let match: RegExpExecArray | null;
+    while ((match = regex.exec(path)) !== null) {
+      if (match.index > lastIndex) {
+        parts.push({ text: path.slice(lastIndex, match.index), isParam: false });
+      }
+      parts.push({ text: `{${match[1]}}`, isParam: true });
+      lastIndex = regex.lastIndex;
+    }
+    if (lastIndex < path.length) {
+      parts.push({ text: path.slice(lastIndex), isParam: false });
+    }
+    return parts;
+  }, [path]);
 
   return (
     <span
       className={cn("font-mono text-sm", className)}
-      // biome-ignore lint/security/noDangerouslySetInnerHtml: "needed for parameter highlighting"
-      // oxlint-disable-next-line eslint-plugin-react(no-danger)
-      dangerouslySetInnerHTML={{
-        __html: (children ?? highlightedPath) as string,
-      }}
       {...props}
-    />
+    >
+      {children ?? pathSegments.map((seg, i) =>
+        seg.isParam ? (
+          <span key={i} className="text-blue-600 dark:text-blue-400">{seg.text}</span>
+        ) : (
+          <span key={i}>{seg.text}</span>
+        )
+      )}
+    </span>
   );
 };
 

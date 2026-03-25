@@ -1,5 +1,8 @@
 import { NextRequest, NextResponse } from "next/server";
 import { generateForTools, resolveModel } from "@/module/ai/lib/gemini";
+import { auth } from "@/lib/auth";
+import { headers } from "next/headers";
+import { rateLimit } from "@/lib/rate-limit";
 
 const MAX_SYSTEM = 500;
 const MAX_MSG = 1200;
@@ -7,9 +10,23 @@ const MAX_TURNS = 3;
 
 export async function POST(req: NextRequest) {
   try {
-    if (!process.env.GEMINI_AI_TOOLS_API_KEY?.trim() && !process.env.GEMINI_BACKUP_API_KEY?.trim()) {
-      return NextResponse.json({ error: "GEMINI_AI_TOOLS_API_KEY or GEMINI_BACKUP_API_KEY is required" }, { status: 500 });
+    // Auth check
+    const session = await auth.api.getSession({ headers: await headers() });
+    if (!session?.user?.id) {
+      return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
     }
+
+    // Rate limit: 30 requests per minute per user
+    const rl = rateLimit(`ai-playground:${session.user.id}`, 30, 60_000);
+    if (!rl.allowed) {
+      return NextResponse.json({ error: "Too many requests" }, { status: 429 });
+    }
+
+    // API key check
+    if (!process.env.GEMINI_API_KEY?.trim() && !process.env.GEMINI_BACKUP_API_KEY?.trim()) {
+      return NextResponse.json({ error: "AI service unavailable" }, { status: 503 });
+    }
+
     const body = await req.json();
     const messages = body?.messages;
     const systemPrompt = body?.systemPrompt;
@@ -41,8 +58,7 @@ export async function POST(req: NextRequest) {
       headers: { "Content-Type": "text/plain; charset=utf-8" },
     });
   } catch (error: unknown) {
-    const message = error instanceof Error ? error.message : "Failed";
-    console.error("[AI Playground]", message);
-    return NextResponse.json({ error: message }, { status: 500 });
+    console.error("[AI Playground]", error instanceof Error ? error.message : error);
+    return NextResponse.json({ error: "Failed to process request" }, { status: 500 });
   }
 }
