@@ -203,8 +203,8 @@ async function batchEmbed(texts: string[], taskType: "RETRIEVAL_DOCUMENT" | "COD
           failed++;
         }
       }
-    }),
-  );
+    }
+  }
 
   return { embeddings, succeeded, failed };
 }
