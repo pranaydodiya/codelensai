@@ -3,7 +3,7 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends
 
 from chat.schemas import ChatMessageRequest, ChatMessageResponse, HealthResponse
-from chat.service import _ollama_is_available, answer_question
+from chat.service import _ollama_is_available, answer_question, clear_session_memory
 from core.config import get_settings
 from core.security import verify_api_key
 
@@ -30,7 +30,7 @@ async def chat_message(body: ChatMessageRequest) -> ChatMessageResponse:
     summary="Clear the conversation history for a session.",
 )
 async def clear_session(session_id: str) -> dict[str, str]:
-    # No-op: memory is ephemeral and no longer stored
+    clear_session_memory(session_id)
     return {"status": "cleared", "session_id": session_id}
 
 
@@ -41,9 +41,12 @@ async def clear_session(session_id: str) -> dict[str, str]:
 )
 async def health() -> HealthResponse:
     settings = get_settings()
-    ollama_ok = await _ollama_is_available()
+    ollama_ok = settings.ollama_enabled and await _ollama_is_available()
+    gemini_ok = bool(settings.google_api_key)
+    # Service is "ok" if at least one LLM backend works
+    status = "ok" if (gemini_ok or ollama_ok) else "degraded"
     return HealthResponse(
-        status="ok" if ollama_ok else "degraded",
+        status=status,
         ollama_available=ollama_ok,
-        gemini_available=bool(settings.google_api_key),
+        gemini_available=gemini_ok,
     )

@@ -8,7 +8,7 @@
 
 const PYTHON_AI_URL = (process.env.PYTHON_AI_URL ?? "http://localhost:8000").replace(/\/$/, "");
 const PYTHON_AI_API_KEY = process.env.PYTHON_AI_API_KEY ?? "";
-const TIMEOUT_MS = Number(process.env.PYTHON_AI_TIMEOUT ?? "30000");
+const TIMEOUT_MS = Number(process.env.PYTHON_AI_TIMEOUT ?? "120000");
 
 // ─── Shared types (mirror of Python schemas.py) ───────────────────────────────
 
@@ -96,7 +96,8 @@ export async function chatWithCodebase(params: {
       message: params.message,
       session_id: params.sessionId ?? null,
     });
-  } catch {
+  } catch (error) {
+    console.error("python-bridge chatWithCodebase error:", error);
     return null;
   }
 }
@@ -119,7 +120,7 @@ export async function clearChatSession(sessionId: string): Promise<void> {
 export async function getPythonServiceHealth(): Promise<PythonServiceHealth | null> {
   try {
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), 3_000);
+    const timer = setTimeout(() => controller.abort(), 10_000);
     try {
       const res = await fetch(`${PYTHON_AI_URL}/chat/health`, {
         signal: controller.signal,
